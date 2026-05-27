@@ -4,10 +4,12 @@
 > **This is not for production systems. Experimental and educational purposes only.**
 >
 > _Also requires OneLake Iceberg write (private preview, limited access)._
+> 
+> OneLake Iceberg write is mainly for third-party interoperability — think Snowflake, etc.
 
 ---
 
-# dbt + DuckDB + Onelake Iceberg REST Catalog
+# dbt + DuckDB + OneLake Iceberg REST Catalog
 
 Iceberg is cool. The whole pipeline runs anywhere Python runs — your laptop, a GitHub Actions runner, a container, an AI agent. I have a full working pipeline already here, fully deployed on GitHub: <https://github.com/djouallah/analytics-as-code>. This repo uses OneLake Catalog for data storage, specifically to enable Power BI semantic model deployment.
 
