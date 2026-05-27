@@ -166,19 +166,41 @@ with ThreadPoolExecutor(max_workers=8) as executor:
 # still deployed and exercised by the scheduled DataPipeline.
 
 # 5. Deploy semantic model (replace GUIDs in bim, deploy, restore)
-# Retries on "model is refreshing" race from a prior CI run's step 6.
+# Skips fab_deploy if the post-substitution .bim matches the one cached in
+# OneLake from the previous deploy (Files/semanticmodel/<SM_NAME>.bim).
 print("=== 5. Deploy semantic model ===")
 bim_path.write_text(bim_text.replace(source_ws_id, WS_ID).replace(source_lh_id, target_lh_id))
+local_bim = bim_path.read_bytes()
+remote_bim_path = f"{LAKEHOUSE}/Files/semanticmodel/{SM_NAME}.bim"
+
+cache_path = root / "_remote_bim_cache.bim"
+cache_path.unlink(missing_ok=True)
+download = subprocess.run(
+    ["fab", "cp", remote_bim_path, cache_path.as_posix(), "-f"],
+    capture_output=True, text=True, cwd=str(root),
+)
+unchanged = (
+    download.returncode == 0
+    and cache_path.exists()
+    and cache_path.read_bytes() == local_bim
+)
+cache_path.unlink(missing_ok=True)
+
 try:
-    for attempt in range(1, 4):
-        try:
-            fab_deploy(["SemanticModel"])
-            break
-        except subprocess.CalledProcessError:
-            if attempt == 3:
-                raise
-            print(f"SemanticModel deploy attempt {attempt} failed (likely mid-refresh); waiting 45s and retrying...")
-            time.sleep(45)
+    if unchanged:
+        print("SemanticModel definition matches cached deploy, skipping fab_deploy.")
+    else:
+        for attempt in range(1, 4):
+            try:
+                fab_deploy(["SemanticModel"])
+                break
+            except subprocess.CalledProcessError:
+                if attempt == 3:
+                    raise
+                print(f"SemanticModel deploy attempt {attempt} failed (likely mid-refresh); waiting 45s and retrying...")
+                time.sleep(45)
+        subprocess.run(["fab", "mkdir", f"{LAKEHOUSE}/Files/semanticmodel"], cwd=str(root))
+        fab(["cp", str(bim_path), remote_bim_path, "-f"])
 finally:
     subprocess.run(["git", "checkout", str(bim_path)], cwd=str(root))
 
