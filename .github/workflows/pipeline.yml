@@ -107,16 +107,24 @@ jobs:
       - name: 🔨 Phase 2 — dbt run
         run: |
           T0=$(date +%s)
-          dbt run --target dev --project-dir dbt --profiles-dir dbt || {
+          # dbt retry rewrites run_results.json with ONLY the reran nodes, so
+          # snapshot after each attempt and let the summary merge them (later
+          # attempts override earlier per unique_id) for the true final status.
+          snap() { cp dbt/target/run_results.json "/tmp/rr_$1.json" 2>/dev/null || true; }
+          rc=0; dbt run --target dev --project-dir dbt --profiles-dir dbt || rc=$?
+          snap 0
+          if [ $rc -ne 0 ]; then
             echo "::warning::dbt run had failures — sleeping 60s and retrying (1/2)..."
             sleep 60
-            dbt retry --target dev --project-dir dbt --profiles-dir dbt || {
+            rc=0; dbt retry --target dev --project-dir dbt --profiles-dir dbt || rc=$?
+            snap 1
+            if [ $rc -ne 0 ]; then
               echo "::warning::retry 1 still failing — sleeping 90s and retrying (2/2)..."
               sleep 90
-              dbt retry --target dev --project-dir dbt --profiles-dir dbt
-            }
-          }
-          cp dbt/target/run_results.json /tmp/run_results.json
+              dbt retry --target dev --project-dir dbt --profiles-dir dbt || true
+              snap 2
+            fi
+          fi
           echo "T_DBT_RUN=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
 
       - name: ✅ Phase 3 — dbt test
@@ -174,12 +182,22 @@ jobs:
           ]
           total = sum(int(p[2] or 0) for p in phases)
 
-          try:
-              rs = json.load(open('/tmp/run_results.json'))['results']
-              rstat = Counter(x['status'] for x in rs)
-              rslow = sorted(rs, key=lambda x: -x.get('execution_time', 0))[:3]
-          except FileNotFoundError:
-              rs, rstat, rslow = [], Counter(), []
+          # Merge run + retry snapshots: dbt retry overwrites run_results.json
+          # with only the reran nodes, so later snapshots override earlier ones
+          # per unique_id to recover the final status of every model.
+          def load_results(path):
+              try:
+                  return json.load(open(path))['results']
+              except FileNotFoundError:
+                  return []
+
+          merged = {}
+          for p in ('/tmp/rr_0.json', '/tmp/rr_1.json', '/tmp/rr_2.json'):
+              for r in load_results(p):
+                  merged[r['unique_id']] = r
+          rs = list(merged.values())
+          rstat = Counter(x['status'] for x in rs)
+          rslow = sorted(rs, key=lambda x: -x.get('execution_time', 0))[:3]
 
           try:
               ts = json.load(open('/tmp/test_results.json'))['results']
@@ -229,10 +247,10 @@ jobs:
           print(f"![duration](https://img.shields.io/badge/total-{fmt(total).replace(' ', '_')}-blue?style=for-the-badge)")
           print()
 
-          # ===== 2x3 grid =====
+          # ===== 4-card layout: Timings | Fabric on top, dbt full-width below =====
           print("<table>")
 
-          # Row 1: Timings | Lakehouse
+          # Row 1: Timings | Fabric (Lakehouse details + deployed items)
           print('<tr><td width="50%" valign="top">\n')
           print("### ⏱️ Phase Timings\n")
           print("| Phase | Duration |")
@@ -241,20 +259,37 @@ jobs:
               print(f"| {emoji} {name} | {fmt(secs)} |")
           print(f"| **Total** | **{fmt(total)}** |")
           print('\n</td><td width="50%" valign="top">\n')
-          print("### 🏗️ Lakehouse\n")
+          print("### 🚀 Fabric\n")
           print("| | |")
           print("| --- | --- |")
           print(f"| 🏢 Workspace | `{ws}` |")
-          print(f"| 🏠 Lakehouse | `{lh}` |")
-          print(f"| 🆔 Workspace ID | `{ws_id}` |")
-          print(f"| 🆔 Lakehouse ID | `{lh_id}` |")
           print(f"| 🛠️ Action | {lh_action} |")
+          if env('DEPLOY_SKIPPED') == 'true':
+              print(f"| 🏠 Lakehouse | `{lh}` |")
+              print(f"\n_Deploy skipped — no `{branch}:` section in `deploy_config.yml`_")
+          else:
+              emojis = {
+                  'Lakehouse': '🏠', 'Notebook': '📓', 'SemanticModel': '📊',
+                  'DataPipeline': '🔄', 'VariableLibrary': '📚',
+                  'Warehouse': '🏭', 'Report': '📈',
+              }
+              print(f"\n**🚀 Deployed items ({1 + len(items)})**\n")
+              print("| Type | Name |")
+              print("| :---: | --- |")
+              print(f"| 🏠 Lakehouse | `{lh}` |")
+              for typ, name in items:
+                  print(f"| {emojis.get(typ, '📦')} {typ} | `{name}` |")
           print('\n</td></tr>')
 
-          # Row 2: dbt run | dbt test
-          print('<tr><td valign="top">\n')
+          # Row 2: dbt (run · test · docs) — full width, three sub-columns
           ok = rstat.get('success', 0); err = rstat.get('error', 0); skip = rstat.get('skipped', 0)
-          print(f"### 🔨 dbt run · {len(rs)} models · {fmt(env('T_DBT_RUN', '0'))}\n")
+          tp = tstat.get('pass', 0); tf = tstat.get('fail', 0); tw = tstat.get('warn', 0); te = tstat.get('error', 0)
+          icons = {'model': '🧱', 'test': '✅', 'seed': '🌱', 'snapshot': '📸', 'operation': '⚙️'}
+          print('<tr><td colspan="2" valign="top">\n')
+          print("### 🔨 dbt\n")
+          print('<table><tr><td valign="top">\n')
+          # run
+          print(f"**🔨 run · {len(rs)} models · {fmt(env('T_DBT_RUN', '0'))}**\n")
           print("| Status | Count |")
           print("| --- | ---: |")
           print(f"| ✅ Success | **{ok}** |")
@@ -265,38 +300,19 @@ jobs:
               slow_str = " · ".join(f"`{s['unique_id'].split('.')[-1]}` {s.get('execution_time', 0):.1f}s" for s in rslow)
               print(f"**🐢 Slowest:** {slow_str}")
           print('\n</td><td valign="top">\n')
-          tp = tstat.get('pass', 0); tf = tstat.get('fail', 0); tw = tstat.get('warn', 0); te = tstat.get('error', 0)
-          print(f"### ✅ dbt test · {ttotal} tests · {fmt(env('T_DBT_TEST', '0'))}\n")
+          # test
+          print(f"**✅ test · {ttotal} tests · {fmt(env('T_DBT_TEST', '0'))}**\n")
           print("| Result | Count |")
           print("| --- | ---: |")
           print(f"| ✅ Pass | **{tp}** |")
           print(f"| ❌ Fail | **{tf}** |")
           print(f"| ⚠️ Warn | **{tw}** |")
           print(f"| 💥 Error | **{te}** |")
-          print('\n</td></tr>')
-
-          # Row 3: Deployed | Docs
-          print('<tr><td valign="top">\n')
-          if env('DEPLOY_SKIPPED') == 'true':
-              print("### 🚀 Deployed Fabric Items\n")
-              print(f"_Skipped — no `{branch}:` section in `deploy_config.yml`_")
-          else:
-              emojis = {
-                  'Lakehouse': '🏠', 'Notebook': '📓', 'SemanticModel': '📊',
-                  'DataPipeline': '🔄', 'VariableLibrary': '📚',
-                  'Warehouse': '🏭', 'Report': '📈',
-              }
-              print(f"### 🚀 Deployed Fabric Items ({1 + len(items)})\n")
-              print("| Type | Name |")
-              print("| :---: | --- |")
-              print(f"| 🏠 Lakehouse | `{lh}` |")
-              for typ, name in items:
-                  print(f"| {emojis.get(typ, '📦')} {typ} | `{name}` |")
           print('\n</td><td valign="top">\n')
-          print("### 📚 dbt Documentation\n")
+          # docs
+          print(f"**📚 docs · {fmt(env('T_DBT_DOCS', '0'))}**\n")
           print("| Resource | Count |")
           print("| --- | ---: |")
-          icons = {'model': '🧱', 'test': '✅', 'seed': '🌱', 'snapshot': '📸', 'operation': '⚙️'}
           for k in ('model', 'test', 'seed', 'snapshot', 'operation'):
               if by_type.get(k):
                   print(f"| {icons[k]} {k.title()}s | **{by_type[k]}** |")
@@ -304,6 +320,7 @@ jobs:
           print(f"| 🧙 Macros | **{n_macros}** |")
           if page_url:
               print(f"\n🔗 [Live docs]({page_url})")
+          print('\n</td></tr></table>')
           print('\n</td></tr>')
           print("</table>\n")
 
