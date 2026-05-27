@@ -223,28 +223,53 @@ fab(["set", PIPELINE, "-q",
      "definition.parts[0].payload.properties.activities[0].typeProperties.workspaceId",
      "-i", WS_ID, "-f"])
 
-result = subprocess.run(
-    ["fab", "job", "run-list", PIPELINE, "--schedule", "--output_format", "json"],
-    capture_output=True, text=True, cwd=str(root),
-)
-schedules = []
-if result.returncode == 0:
-    try:
-        schedules = json.loads(result.stdout).get("result", {}).get("data", [])
-    except json.JSONDecodeError:
-        print(f"run-list returned non-JSON, treating as no schedule:\n{result.stdout}")
-else:
-    print(f"run-list exited {result.returncode}, treating as no schedule.\nstdout: {result.stdout}\nstderr: {result.stderr}")
+# Reconcile to EXACTLY ONE schedule on the pipeline. Detection must be reliable
+# or schedules pile up: the old `fab job run-list <pl> --schedule` queries
+# jobType=Execute, which the Fabric API always rejects with 400
+# InvalidConfiguration for pipelines, so every deploy saw "no schedule" and
+# created another one. The correct listing is the REST API with jobType=Pipeline.
+# Note: that list 400s if ANY existing schedule has a config it can't serialize
+# (one odd-type schedule poisons the whole list) — in that case we must NOT act
+# (can't enumerate ids to dedupe, and creating would only add to the pile), so
+# skip and let the operator remove the offending schedule in the portal.
+pl_id = get_item_id(PIPELINE)
+sched_url = f"workspaces/{WS_ID}/items/{pl_id}/jobs/Pipeline/schedules"
+result = subprocess.run(["fab", "api", "-X", "get", sched_url],
+                        capture_output=True, text=True, cwd=str(root))
+try:
+    body = json.loads(result.stdout)
+except json.JSONDecodeError:
+    body = {}
+code = body.get("status_code")
+text = body.get("text") if isinstance(body.get("text"), dict) else {}
 
-if any(s.get("enabled") for s in schedules):
-    print("Pipeline already scheduled and enabled, skipping.")
+if code != 200:
+    print(f"::warning::schedule list returned {code} "
+          f"({text.get('errorCode')}: {text.get('message')}). Skipping schedule "
+          f"management to avoid duplicates — remove the offending schedule in the "
+          f"Fabric portal (Pipeline → Schedule) so the list works again.")
 else:
-    try:
+    schedules = text.get("value") or []
+    if not schedules:
+        print("No existing schedule, creating one.")
         fab(["job", "run-sch", PIPELINE,
              "--type", "cron", "--interval", cfg["schedule_interval"],
              "--start", cfg["schedule_start"], "--end", cfg["schedule_end"], "--enable"])
-    except subprocess.CalledProcessError as e:
-        print(f"::warning::run-sch failed (schedule may already exist): {e}")
+    else:
+        # Keep one (prefer an enabled Cron, oldest first), remove the rest.
+        schedules.sort(key=lambda s: (
+            (s.get("configuration") or {}).get("type") != "Cron",
+            not s.get("enabled"),
+            s.get("createdDateTime", ""),
+        ))
+        keep, extras = schedules[0], schedules[1:]
+        if extras:
+            print(f"Pipeline has {len(schedules)} schedules; keeping {keep['id']}, "
+                  f"removing {len(extras)} extra(s).")
+            for s in extras:
+                fab(["job", "run-rm", PIPELINE, "--id", s["id"], "-f"])
+        else:
+            print(f"Pipeline already has exactly one schedule ({keep['id']}), skipping.")
 
 
 print("=== Deploy complete ===")
