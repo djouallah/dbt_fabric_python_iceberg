@@ -26,21 +26,11 @@ You can run the notebook anywhere — I've used it on my laptop, GitHub, Colab (
 
 ### Limitations
 
-- **This is a personal project** — not affiliated with or supported by Microsoft.
-- **OneLake catalog Iceberg write is coming soon** — currently preview.
 - **Direct Lake reads** work via OneLake's auto-generated Delta metadata, but generation is asynchronous, so freshly written data may take a moment to appear as a Delta table.
 - **Table maintenance is on you** — compaction, snapshot expiry, etc. PyIceberg is a reasonable place to start.
 - **DuckDB 1.4.4** specifically — other versions will not work against the OneLake catalog.
 - **Force install `avro` from `core_nightly`**.
 - **Must set `support_stage_create: 0`** in the Iceberg attach options.
-
-## Why not Delta Lake
-
-When you use Fabric, Delta makes more sense — your Iceberg metadata gets converted to Delta anyway when you write Iceberg. The catch: there is no open-source dbt Delta adapter besides Spark, and I gave up waiting.
-
-## Why not DuckLake
-
-DuckLake is awesome, but you need to manage the database and exporting Iceberg metadata is not supported. For fun: <https://github.com/djouallah/dbt_fabric_python_ducklake> — this scenario is not supported by Microsoft in any form or shape; it's for educational purposes only.
 
 ## dbt Iceberg configuration
 
