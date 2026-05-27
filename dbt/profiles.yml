@@ -1,0 +1,25 @@
+aemo_electricity:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: ':memory:'
+      database: onelake
+      threads: 1
+      schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
+      settings:
+        preserve_insertion_order: false
+      secrets:
+        - type: azure
+          name: onelake_storage
+          provider: access_token
+          access_token: "{{ env_var('ONELAKE_TOKEN') }}"
+      attach:
+        - path: "{{ env_var('WAREHOUSE_PATH') }}"
+          alias: onelake
+          type: iceberg
+          options:
+            endpoint: "{{ env_var('ONELAKE_ENDPOINT') }}"
+            token: "{{ env_var('ONELAKE_TOKEN') }}"
+            support_stage_create: 0
+            default_schema: dbo

@@ -1,0 +1,37 @@
+name: 'aemo_electricity'
+version: '1.0.0'
+
+profile: 'aemo_electricity'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+on-run-start:
+  - "SET GLOBAL azure_transport_option_type = '{{ env_var('AZURE_TRANSPORT_OPTION_TYPE', 'default') }}'"
+
+vars:
+  # Env vars used:
+  # - DBT_SCHEMA: schema name (default: mart)
+  # - csv_archive_path, path_root: for abfss:// paths in Fabric
+  # - download_limit: number of files to download per source (default: 2)
+  
+
+
+models:
+  aemo_electricity:
+    staging:
+      +materialized: view
+      +schema: landing
+    dimensions:
+      +materialized: table
+    marts:
+      +materialized: incremental
+      +schema: landing
+

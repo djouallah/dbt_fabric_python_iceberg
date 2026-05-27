@@ -1,0 +1,345 @@
+name: 🚀 Deploy to Fabric
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "dbt/**"
+      - "fabric_items/**"
+      - "deploy.py"
+      - "deploy_config.yml"
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+  pages: write
+
+env:
+  AZURE_TRANSPORT_OPTION_TYPE: curl
+  CURL_CA_INFO: /etc/ssl/certs/ca-certificates.crt
+  ONELAKE_ENDPOINT: https://onelake.table.fabric.microsoft.com/iceberg
+
+jobs:
+  pipeline:
+    name: 🎯 Pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 📦 Install dependencies
+        run: pip install dbt-duckdb duckdb==1.4.4 pyyaml ms-fabric-cli
+
+      - name: 🦆 FORCE INSTALL DuckDB extensions (nightly)
+        run: |
+          python - <<'EOF'
+          import duckdb
+          c = duckdb.connect(':memory:')
+          for ext in ('avro', 'iceberg', 'azure'):
+              c.execute(f"FORCE INSTALL {ext} FROM core_nightly")
+              print(f"  ✓ {ext}")
+          EOF
+
+      - name: 🔐 Azure federated login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: 🎟️  Mint OneLake token + Fabric CLI login
+        run: |
+          TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          fab config set encryption_fallback_enabled true
+          FED_TOKEN=$(curl -sH "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r '.value')
+          fab auth login -t ${{ secrets.AZURE_TENANT_ID }} -u ${{ secrets.AZURE_CLIENT_ID }} --federated-token "$FED_TOKEN"
+
+      - name: 🏗️  Phase 1 — Provision Lakehouse
+        run: |
+          T0=$(date +%s)
+          WS_ID=$(python -c "import yaml; c=yaml.safe_load(open('deploy_config.yml')); print({**c.get('defaults',{}),**c['main']}['ws'])")
+          LH_NAME=$(python -c "import yaml; c=yaml.safe_load(open('deploy_config.yml')); print({**c.get('defaults',{}),**c['main']}['lakehouse_name'])")
+          WS_NAME=$(fab api -X get "workspaces/$WS_ID" | jq -r '.text.displayName' | tr -d '\r')
+          LAKEHOUSE="$WS_NAME.Workspace/$LH_NAME.Lakehouse"
+          ACTION="already existed"
+          if fab exists "$LAKEHOUSE" | grep -qi true; then
+            echo "✅ Lakehouse exists"
+          else
+            echo "🛠️  Creating..."
+            fab create "$LAKEHOUSE" -P enableSchemas=true
+            sleep 60
+            ACTION="just created"
+          fi
+          LH_ID=$(fab get "$LAKEHOUSE" -q id | tr -d '\r')
+          python - <<EOF >> "$GITHUB_ENV"
+          import yaml
+          cfg = yaml.safe_load(open('deploy_config.yml'))
+          e = {**cfg.get('defaults', {}), **cfg['main']}
+          print(f"download_limit={e.get('ci_download_limit', e.get('download_limit', '5'))}")
+          print(f"process_limit={e.get('ci_process_limit', e.get('process_limit', '100'))}")
+          EOF
+          {
+            echo "WAREHOUSE_PATH=$WS_ID/$LH_ID"
+            echo "FILES_PATH=abfss://$WS_ID@onelake.dfs.fabric.microsoft.com/$LH_ID/Files"
+            echo "WS_ID=$WS_ID"
+            echo "WS_NAME=$WS_NAME"
+            echo "LH_ID=$LH_ID"
+            echo "LH_NAME=$LH_NAME"
+            echo "LH_ACTION=$ACTION"
+            echo "T_LAKEHOUSE=$(($(date +%s) - T0))"
+          } >> "$GITHUB_ENV"
+
+      - name: 🔨 Phase 2 — dbt run
+        run: |
+          T0=$(date +%s)
+          dbt run --target dev --project-dir dbt --profiles-dir dbt || {
+            echo "::warning::dbt run had failures — sleeping 60s and retrying (1/2)..."
+            sleep 60
+            dbt retry --target dev --project-dir dbt --profiles-dir dbt || {
+              echo "::warning::retry 1 still failing — sleeping 90s and retrying (2/2)..."
+              sleep 90
+              dbt retry --target dev --project-dir dbt --profiles-dir dbt
+            }
+          }
+          cp dbt/target/run_results.json /tmp/run_results.json
+          echo "T_DBT_RUN=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
+
+      - name: ✅ Phase 3 — dbt test
+        run: |
+          T0=$(date +%s)
+          dbt test --target dev --project-dir dbt --profiles-dir dbt --exclude tag:heavy
+          cp dbt/target/run_results.json /tmp/test_results.json
+          echo "T_DBT_TEST=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
+
+      - name: 📚 Phase 4 — dbt docs generate
+        run: |
+          T0=$(date +%s)
+          dbt docs generate --target dev --project-dir dbt --profiles-dir dbt
+          echo "T_DBT_DOCS=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
+
+      - name: 🚀 Phase 5 — Deploy Fabric items
+        run: |
+          T0=$(date +%s)
+          if grep -q "^${{ github.ref_name }}:" deploy_config.yml; then
+            python deploy.py --env ${{ github.ref_name }}
+            echo "DEPLOY_SKIPPED=false" >> "$GITHUB_ENV"
+          else
+            echo "::notice::No '${{ github.ref_name }}' section in deploy_config.yml — skipping deploy."
+            echo "DEPLOY_SKIPPED=true" >> "$GITHUB_ENV"
+          fi
+          echo "T_DEPLOY=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
+
+      - name: 📤 Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dbt/target
+
+      - name: 📝 Build dashboard summary
+        if: always()
+        env:
+          PAGE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          from collections import Counter
+
+          def fmt(s):
+              s = int(s or 0)
+              return f"{s}s" if s < 60 else f"{s//60}m {s%60:02d}s"
+
+          def env(k, default=''):
+              return os.environ.get(k, default) or default
+
+          phases = [
+              ('🏗️', 'Provision Lakehouse', env('T_LAKEHOUSE', '0')),
+              ('🔨', 'dbt run',             env('T_DBT_RUN',   '0')),
+              ('✅', 'dbt test',            env('T_DBT_TEST',  '0')),
+              ('📚', 'dbt docs',            env('T_DBT_DOCS',  '0')),
+              ('🚀', 'Deploy Fabric',       env('T_DEPLOY',    '0')),
+          ]
+          total = sum(int(p[2] or 0) for p in phases)
+
+          try:
+              rs = json.load(open('/tmp/run_results.json'))['results']
+              rstat = Counter(x['status'] for x in rs)
+              rslow = sorted(rs, key=lambda x: -x.get('execution_time', 0))[:3]
+          except FileNotFoundError:
+              rs, rstat, rslow = [], Counter(), []
+
+          try:
+              ts = json.load(open('/tmp/test_results.json'))['results']
+              tstat = Counter(x['status'] for x in ts)
+              ttotal = len(ts)
+          except FileNotFoundError:
+              tstat, ttotal = Counter(), 0
+
+          try:
+              m = json.load(open('dbt/target/manifest.json'))
+              by_type = Counter(n.get('resource_type') for n in m.get('nodes', {}).values())
+              n_sources = len(m.get('sources', {}))
+              n_macros = len(m.get('macros', {}))
+          except FileNotFoundError:
+              by_type, n_sources, n_macros = Counter(), 0, 0
+
+          items = []
+          if env('DEPLOY_SKIPPED') != 'true':
+              try:
+                  for f in sorted(os.listdir('fabric_items')):
+                      if '.' in f:
+                          name, typ = f.rsplit('.', 1)
+                          items.append((typ, name))
+              except FileNotFoundError:
+                  pass
+
+          ws        = env('WS_NAME', '?')
+          lh        = env('LH_NAME', '?')
+          ws_id     = env('WS_ID')
+          lh_id     = env('LH_ID')
+          lh_action = env('LH_ACTION', '?')
+          sha       = env('GITHUB_SHA')[:7]
+          branch    = env('GITHUB_REF_NAME', '?')
+          actor     = env('GITHUB_ACTOR', '?')
+          page_url  = env('PAGE_URL')
+          repo      = env('GITHUB_REPOSITORY')
+          server    = env('GITHUB_SERVER_URL', 'https://github.com')
+          run_id    = env('GITHUB_RUN_ID')
+
+          # ===== Header =====
+          print("# 🎯 Pipeline Summary")
+          print()
+          print(f"![pipeline](https://img.shields.io/badge/pipeline-success-brightgreen?style=for-the-badge&logo=githubactions)", end=' ')
+          print(f"![workspace](https://img.shields.io/badge/workspace-{ws}-0078d4?style=for-the-badge&logo=microsoft)", end=' ')
+          print(f"![branch](https://img.shields.io/badge/branch-{branch}-7719aa?style=for-the-badge)", end=' ')
+          print(f"![sha](https://img.shields.io/badge/sha-{sha}-grey?style=for-the-badge&logo=github)", end=' ')
+          print(f"![duration](https://img.shields.io/badge/total-{fmt(total).replace(' ', '_')}-blue?style=for-the-badge)")
+          print()
+
+          # ===== 2x3 grid =====
+          print("<table>")
+
+          # Row 1: Timings | Lakehouse
+          print('<tr><td width="50%" valign="top">\n')
+          print("### ⏱️ Phase Timings\n")
+          print("| Phase | Duration |")
+          print("| --- | ---: |")
+          for emoji, name, secs in phases:
+              print(f"| {emoji} {name} | {fmt(secs)} |")
+          print(f"| **Total** | **{fmt(total)}** |")
+          print('\n</td><td width="50%" valign="top">\n')
+          print("### 🏗️ Lakehouse\n")
+          print("| | |")
+          print("| --- | --- |")
+          print(f"| 🏢 Workspace | `{ws}` |")
+          print(f"| 🏠 Lakehouse | `{lh}` |")
+          print(f"| 🆔 Workspace ID | `{ws_id}` |")
+          print(f"| 🆔 Lakehouse ID | `{lh_id}` |")
+          print(f"| 🛠️ Action | {lh_action} |")
+          print('\n</td></tr>')
+
+          # Row 2: dbt run | dbt test
+          print('<tr><td valign="top">\n')
+          ok = rstat.get('success', 0); err = rstat.get('error', 0); skip = rstat.get('skipped', 0)
+          print(f"### 🔨 dbt run · {len(rs)} models · {fmt(env('T_DBT_RUN', '0'))}\n")
+          print("| Status | Count |")
+          print("| --- | ---: |")
+          print(f"| ✅ Success | **{ok}** |")
+          print(f"| ❌ Error | **{err}** |")
+          print(f"| ⏭️ Skipped | **{skip}** |")
+          if rslow:
+              print()
+              slow_str = " · ".join(f"`{s['unique_id'].split('.')[-1]}` {s.get('execution_time', 0):.1f}s" for s in rslow)
+              print(f"**🐢 Slowest:** {slow_str}")
+          print('\n</td><td valign="top">\n')
+          tp = tstat.get('pass', 0); tf = tstat.get('fail', 0); tw = tstat.get('warn', 0); te = tstat.get('error', 0)
+          print(f"### ✅ dbt test · {ttotal} tests · {fmt(env('T_DBT_TEST', '0'))}\n")
+          print("| Result | Count |")
+          print("| --- | ---: |")
+          print(f"| ✅ Pass | **{tp}** |")
+          print(f"| ❌ Fail | **{tf}** |")
+          print(f"| ⚠️ Warn | **{tw}** |")
+          print(f"| 💥 Error | **{te}** |")
+          print('\n</td></tr>')
+
+          # Row 3: Deployed | Docs
+          print('<tr><td valign="top">\n')
+          if env('DEPLOY_SKIPPED') == 'true':
+              print("### 🚀 Deployed Fabric Items\n")
+              print(f"_Skipped — no `{branch}:` section in `deploy_config.yml`_")
+          else:
+              emojis = {
+                  'Lakehouse': '🏠', 'Notebook': '📓', 'SemanticModel': '📊',
+                  'DataPipeline': '🔄', 'VariableLibrary': '📚',
+                  'Warehouse': '🏭', 'Report': '📈',
+              }
+              print(f"### 🚀 Deployed Fabric Items ({1 + len(items)})\n")
+              print("| Type | Name |")
+              print("| :---: | --- |")
+              print(f"| 🏠 Lakehouse | `{lh}` |")
+              for typ, name in items:
+                  print(f"| {emojis.get(typ, '📦')} {typ} | `{name}` |")
+          print('\n</td><td valign="top">\n')
+          print("### 📚 dbt Documentation\n")
+          print("| Resource | Count |")
+          print("| --- | ---: |")
+          icons = {'model': '🧱', 'test': '✅', 'seed': '🌱', 'snapshot': '📸', 'operation': '⚙️'}
+          for k in ('model', 'test', 'seed', 'snapshot', 'operation'):
+              if by_type.get(k):
+                  print(f"| {icons[k]} {k.title()}s | **{by_type[k]}** |")
+          print(f"| 🔌 Sources | **{n_sources}** |")
+          print(f"| 🧙 Macros | **{n_macros}** |")
+          if page_url:
+              print(f"\n🔗 [Live docs]({page_url})")
+          print('\n</td></tr>')
+          print("</table>\n")
+
+          # ===== Mermaid below =====
+          print("## 🛤️ Pipeline\n")
+          print("```mermaid")
+          print("flowchart LR")
+          print("  A[🏗️ Lakehouse] --> B[🔨 dbt run]")
+          print("  B --> C[✅ dbt test]")
+          print("  C --> D[📚 dbt docs]")
+          print("  D --> E[🚀 Deploy Fabric]")
+          print("  E --> F[🌐 Publish docs]")
+          print("```")
+          print()
+          print("---")
+          print(f'<sub>Pipeline run by <b>@{actor}</b> · commit <a href="{server}/{repo}/commit/{env("GITHUB_SHA")}"><code>{sha}</code></a> · <a href="{server}/{repo}/actions/runs/{run_id}">view run</a></sub>')
+          PY
+
+  publish:
+    name: 🌐 Publish docs to Pages
+    needs: pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.publish.outputs.page_url }}
+    steps:
+      - name: 🌐 Deploy to GitHub Pages
+        id: publish
+        uses: actions/deploy-pages@v4
+      - name: 📝 Summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          # 🌐 Docs Published
+
+          ![status](https://img.shields.io/badge/pages-live-brightgreen?style=for-the-badge&logo=githubpages)
+
+          🔗 **Live site:** ${{ steps.publish.outputs.page_url }}
+          EOF

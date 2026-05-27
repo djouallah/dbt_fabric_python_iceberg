@@ -1,0 +1,26 @@
+defaults:
+  lakehouse_name:    "data"
+  download_limit:    "2"
+  dbt_path:          "/lakehouse/default/Files/dbt"
+  schedule_interval: "30"
+  schedule_start:    "2025-01-01T00:00:00"
+  schedule_end:      "2030-12-31T23:59:59"
+  ci_download_limit: "6"
+  ci_process_limit:  "2"
+
+local:
+  ws:            "ea575278-bd81-459c-9680-47829898c902"
+  lakehouse:     "d64477d9-00af-4ad1-9844-e559d4ba822b"
+  process_limit: "1000"
+  dbt_path:      "/lakehouse/default/Files/dbt_fabric_python_notebook_iceberg/dbt"
+
+main:
+  ws:                "ea575278-bd81-459c-9680-47829898c902"
+  schedule_interval: "720"
+  download_limit:    "5"
+  process_limit:     "100"
+
+production:
+  ws:             "be079b0f-3416-4de2-9184-9c546bad223c"
+  download_limit: "60"
+  process_limit:  "600"
