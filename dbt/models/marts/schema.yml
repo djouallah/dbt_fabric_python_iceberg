@@ -67,16 +67,26 @@ models:
     columns:
       - name: date
         tests:
-          - not_null
+          - not_null:
+              config:
+                tags: [heavy]
       - name: DUID
         tests:
-          - not_null
+          - not_null:
+              config:
+                tags: [heavy]
           - relationships:
               to: ref('dim_duid')
               field: DUID
+              config:
+                tags: [heavy]
       - name: mw
         tests:
-          - not_null
+          - not_null:
+              config:
+                tags: [heavy]
       - name: price
         tests:
-          - not_null
+          - not_null:
+              config:
+                tags: [heavy]
