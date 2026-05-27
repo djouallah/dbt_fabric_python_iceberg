@@ -184,7 +184,8 @@ jobs:
 
           # Merge run + retry snapshots: dbt retry overwrites run_results.json
           # with only the reran nodes, so later snapshots override earlier ones
-          # per unique_id to recover the final status of every model.
+          # per unique_id to recover the final status of every model. Keep only
+          # model nodes (drop on-run hooks/operations) so the count matches docs.
           def load_results(path):
               try:
                   return json.load(open(path))['results']
@@ -194,7 +195,8 @@ jobs:
           merged = {}
           for p in ('/tmp/rr_0.json', '/tmp/rr_1.json', '/tmp/rr_2.json'):
               for r in load_results(p):
-                  merged[r['unique_id']] = r
+                  if r['unique_id'].startswith('model.'):
+                      merged[r['unique_id']] = r
           rs = list(merged.values())
           rstat = Counter(x['status'] for x in rs)
           rslow = sorted(rs, key=lambda x: -x.get('execution_time', 0))[:3]
@@ -260,12 +262,11 @@ jobs:
           print(f"| **Total** | **{fmt(total)}** |")
           print('\n</td><td width="50%" valign="top">\n')
           print("### 🚀 Fabric\n")
-          print("| | |")
-          print("| --- | --- |")
+          print("| Item | Name |")
+          print("| :---: | --- |")
           print(f"| 🏢 Workspace | `{ws}` |")
-          print(f"| 🛠️ Action | {lh_action} |")
+          print(f"| 🏠 Lakehouse | `{lh}` _({lh_action})_ |")
           if env('DEPLOY_SKIPPED') == 'true':
-              print(f"| 🏠 Lakehouse | `{lh}` |")
               print(f"\n_Deploy skipped — no `{branch}:` section in `deploy_config.yml`_")
           else:
               emojis = {
@@ -273,10 +274,6 @@ jobs:
                   'DataPipeline': '🔄', 'VariableLibrary': '📚',
                   'Warehouse': '🏭', 'Report': '📈',
               }
-              print(f"\n**🚀 Deployed items ({1 + len(items)})**\n")
-              print("| Type | Name |")
-              print("| :---: | --- |")
-              print(f"| 🏠 Lakehouse | `{lh}` |")
               for typ, name in items:
                   print(f"| {emojis.get(typ, '📦')} {typ} | `{name}` |")
           print('\n</td></tr>')
@@ -296,9 +293,9 @@ jobs:
           print(f"| ❌ Error | **{err}** |")
           print(f"| ⏭️ Skipped | **{skip}** |")
           if rslow:
-              print()
-              slow_str = " · ".join(f"`{s['unique_id'].split('.')[-1]}` {s.get('execution_time', 0):.1f}s" for s in rslow)
-              print(f"**🐢 Slowest:** {slow_str}")
+              print("\n**🐢 Slowest**\n")
+              for s in rslow:
+                  print(f"- `{s['unique_id'].split('.')[-1]}` {s.get('execution_time', 0):.1f}s")
           print('\n</td><td valign="top">\n')
           # test
           print(f"**✅ test · {ttotal} tests · {fmt(env('T_DBT_TEST', '0'))}**\n")
