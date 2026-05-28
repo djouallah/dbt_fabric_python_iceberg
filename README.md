@@ -13,6 +13,8 @@
 
 Iceberg is cool. The whole pipeline runs anywhere Python runs — your laptop, a GitHub Actions runner, a container, an AI agent. I have a full working pipeline already here, fully deployed on GitHub: <https://github.com/djouallah/analytics-as-code>. This repo uses OneLake Catalog for data storage, specifically to enable Power BI semantic model deployment.
 
+![OneLake explorer showing the data lakehouse with mart schema tables and dbt project files](onelake.png)
+
 Concretely, for OneLake:
 - `ENDPOINT` = `https://onelake.table.fabric.microsoft.com/iceberg`
 - `WAREHOUSE_PATH` = `{workspace_id}/{lakehouse_id}` — both GUIDs, no `.Lakehouse` suffix
