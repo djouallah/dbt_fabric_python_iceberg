@@ -102,6 +102,8 @@ deploy.py (Fabric CLI + Power BI API)
     └── fab deploy  → Data Pipeline + cron schedule
 ```
 
+![Fabric workspace after deploy: semantic model, lakehouse, variable library, notebook, and pipeline](items.png)
+
 ### Stack
 
 | Layer | Tool |
