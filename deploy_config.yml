@@ -1,7 +1,6 @@
 defaults:
   lakehouse_name:    "data"
   download_limit:    "2"
-  dbt_path:          "/lakehouse/default/Files/dbt"
   schedule_interval: "30"
   schedule_start:    "2025-01-01T00:00:00"
   schedule_end:      "2030-12-31T23:59:59"

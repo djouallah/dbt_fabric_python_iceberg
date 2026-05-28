@@ -115,7 +115,6 @@ vl_variables = {
         {"name": "process_limit",  "type": "String", "value": cfg["process_limit"]},
         {"name": "lakehouse_name", "type": "String", "value": LH_NAME},
         {"name": "workspace_id",   "type": "String", "value": WS_ID},
-        {"name": "dbt_path",       "type": "String", "value": cfg["dbt_path"]},
     ],
 }
 vl_path.write_text(json.dumps(vl_variables, indent=4))
@@ -124,34 +123,27 @@ try:
 finally:
     subprocess.run(["git", "checkout", str(vl_path)], cwd=str(root))
 
-# 2c. Attach lakehouse to notebook via fab set
-print("=== 2c. Attach lakehouse to notebook ===")
-lakehouse_payload = json.dumps({
-    "known_lakehouses": [{"id": target_lh_id}],
-    "default_lakehouse": target_lh_id,
-    "default_lakehouse_name": LH_NAME,
-    "default_lakehouse_workspace_id": WS_ID,
-})
-fab(["set", NOTEBOOK, "-q", "lakehouse", "-i", lakehouse_payload, "-f"])
-
 # Get target notebook ID (needed for pipeline fab set later)
 target_nb_id = get_item_id(NOTEBOOK)
 print(f"Target notebook ID:  {target_nb_id}")
 
 # 3. Copy dbt files to OneLake
+# Skip build artifacts (target/, logs/) — the notebook regenerates them on every run,
+# and they dominate the per-file `fab cp` subprocess overhead.
 print("=== 3. Copy dbt files to OneLake ===")
+SKIP_DIRS = {"target", "logs"}
+files = [f for f in dbt.rglob("*")
+         if f.is_file() and not (set(f.relative_to(dbt).parts) & SKIP_DIRS)]
+
 dirs = set()
-for f in dbt.rglob("*"):
-    if f.is_file():
-        p = f.relative_to(root).parent
-        while p.parts:
-            dirs.add(p.as_posix())
-            p = p.parent
+for f in files:
+    p = f.relative_to(root).parent
+    while p.parts:
+        dirs.add(p.as_posix())
+        p = p.parent
 
 for d in sorted(dirs):
     subprocess.run(["fab", "mkdir", f"{LAKEHOUSE}/Files/{d}"], cwd=str(root))
-
-files = [f for f in dbt.rglob("*") if f.is_file()]
 
 def copy_file(f):
     rel = f.relative_to(root)
