@@ -196,18 +196,12 @@ try:
 finally:
     subprocess.run(["git", "checkout", str(bim_path)], cwd=str(root))
 
-# 6. Refresh semantic model
-print("=== 6. Refresh semantic model ===")
-SEMANTIC_MODEL = f"{ws}.Workspace/{SM_NAME}.SemanticModel"
-sm_id = get_item_id(SEMANTIC_MODEL)
-fab(["api", "-A", "powerbi", "-X", "post", f"groups/{WS_ID}/datasets/{sm_id}/refreshes"])
-
-# 7. Deploy DataPipeline + set notebook reference + schedule
-print("=== 7. Deploy pipeline ===")
+# 6. Deploy DataPipeline + set notebook reference + schedule
+print("=== 6. Deploy pipeline ===")
 fab_deploy(["DataPipeline"])
 
-# 7b. Set notebook reference on pipeline via fab set
-print("=== 7b. Set notebook on pipeline ===")
+# 6b. Set notebook reference on pipeline via fab set
+print("=== 6b. Set notebook on pipeline ===")
 fab(["set", PIPELINE, "-q",
      "definition.parts[0].payload.properties.activities[0].typeProperties.notebookId",
      "-i", target_nb_id, "-f"])
@@ -262,6 +256,25 @@ else:
                 fab(["job", "run-rm", PIPELINE, "--id", s["id"], "-f"])
         else:
             print(f"Pipeline already has exactly one schedule ({keep['id']}), skipping.")
+
+
+# 7. Refresh semantic model (LAST step — OneLake security/permission propagation
+# lags behind deploy, so an immediate refresh after the SM deploy can fail with
+# permission errors. Microsoft documents role-definition changes taking ~5 min to
+# propagate, so running it last + retrying covers that window.)
+print("=== 7. Refresh semantic model ===")
+SEMANTIC_MODEL = f"{ws}.Workspace/{SM_NAME}.SemanticModel"
+sm_id = get_item_id(SEMANTIC_MODEL)
+for attempt in range(1, 4):
+    try:
+        fab(["api", "-A", "powerbi", "-X", "post", f"groups/{WS_ID}/datasets/{sm_id}/refreshes"])
+        break
+    except subprocess.CalledProcessError:
+        if attempt == 3:
+            raise
+        print(f"Refresh attempt {attempt} failed (likely OneLake security still "
+              f"propagating); waiting 60s and retrying...")
+        time.sleep(60)
 
 
 print("=== Deploy complete ===")
