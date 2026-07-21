@@ -13,6 +13,9 @@ aemo_electricity:
         - avro
       settings:
         preserve_insertion_order: false
+        memory_limit: '5GB'                 # stay under the ~7GB CI runner so DuckDB spills instead of OOM-killing
+        temp_directory: '/tmp/duckdb_spill' # enable disk spilling for the :memory: database
+        max_temp_directory_size: '30GB'
       secrets:
         - type: azure
           name: onelake_storage
