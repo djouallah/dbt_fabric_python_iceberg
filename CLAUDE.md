@@ -1,94 +1,64 @@
-# Fabric CLI Deploy — Lessons Learned
+# Fabric Deploy — duckrun
 
-## parameter.yml
+Deployment uses the **duckrun** workspace API (`deploy.py`), not the Fabric CLI (`fab`). The whole
+flow is a flat, hardcoded script — one workspace, constants at the top, no `deploy_config.yml`.
 
-### replace_value token resolution
-`extract_replace_value` only resolves `$workspace.id` / `$items.*` if the **entire string starts with `$`**.
-Embedding tokens inside a URL string does NOT work:
+## deploy.py flow
+
+```python
+ws = duckrun.workspace(WORKSPACE)          # resolves display name from the ID; self-acquires tokens
+ws.create_lakehouse(LAKEHOUSE, folder=FOLDER)   # idempotent, schema-enabled
+duckrun.connect(f"{ws.display_name}/{LAKEHOUSE}.Lakehouse").copy("dbt", "dbt", overwrite=True)
+ws.deploy("fabric_items", lakehouse=LAKEHOUSE, folder=FOLDER, overwrite=True, variables={...})
+ws.schedule("run_pipeline", every="720m")  # idempotent — updates, never stacks duplicates
+```
+
+`ws.deploy("fabric_items", ...)` deploys the folder's items **in dependency order**
+(VariableLibrary → Notebook → SemanticModel → DataPipeline) and does everything the old `fab`
+script did by hand:
+
+- **Direct Lake bim rebind** — `lakehouse=LAKEHOUSE` rewrites the OneLake workspace/lakehouse GUIDs
+  baked into `model.bim` so the model targets the right lakehouse. No `parameter.yml`, no GUID regex.
+- **Pipeline notebook repoint** — the pipeline's `TridentNotebook` activity is auto-pointed at the
+  folder's single notebook (`notebookId`/`workspaceId` rewritten). No `fab set`.
+- **Variable Library injection** — `variables={...}` sets values in `variables.json` at deploy time.
+- **Semantic model refresh** — a Direct Lake model is reframed/refreshed after deploy, so `deploy`
+  returns only once it is live. (The Delta metadata OneLake auto-generates from the Iceberg tables
+  the CI dbt run wrote must exist first — it does, CI runs dbt before deploy.)
+
+`FOLDER` only places items duckrun **creates**; existing items are updated in place and stay where
+they already live.
+
+## CI (`.github/workflows/pipeline.yml`)
+
+- `pip install duckrun` brings dbt-duckdb, duckdb (>=1.5.4), deltalake, azure-identity, obstore.
+- Auth is OIDC only: `azure/login` + `az account get-access-token` → `ONELAKE_TOKEN` (the Iceberg
+  dbt run reads it). duckrun self-acquires its own tokens. No `fab auth login`, no `ms-fabric-cli`.
+- Phase 1 provisions the lakehouse with duckrun and exports `WAREHOUSE_PATH`/`FILES_PATH`/limits.
+- Phases 2-4 run dbt (run/test/docs). Phase 5 runs `python deploy.py` **only on `main`**.
+
+## OneLake Iceberg write support
+
+The Iceberg REST ATTACH options live in `dbt/profiles.yml`. The current working set:
+
 ```yaml
-# WRONG — $workspace.id is never resolved
-replace_value:
-  _ALL_: "https://onelake.dfs.fabric.microsoft.com/$workspace.id/$items.Lakehouse.data.$id/"
-
-# CORRECT — replace each GUID separately so replace_value starts with $
-- find_value: "e446a5e7-6666-42ad-a331-0bfef3187fbf"
-  replace_value:
-    _ALL_: "$workspace.id"
-- find_value: "cf8bbf8a-5488-4020-ac8f-293727b447b1"
-  replace_value:
-    _ALL_: "$items.Lakehouse.data.$id"
+type: iceberg
+options:
+  endpoint: "{{ env_var('ONELAKE_ENDPOINT') }}"
+  token: "{{ env_var('ONELAKE_TOKEN') }}"
+  access_delegation_mode: 'none'
+  stage_create_tables: 0
+  skip_create_table_metadata_updates: 1
+  default_schema: dbo
 ```
 
-### Tokens are ONLY resolved through parameter.yml
-Fabric CLI does NOT resolve `$workspace.id` or `$items.*` tokens inline in content files.
-Content files (e.g. pipeline-content.json) must contain the original dev GUIDs, and
-parameter.yml must have find_replace entries to swap them with `$` tokens.
-```json
-// WRONG — literal token strings end up deployed unresolved
-{ "workspaceId": "$workspace.id", "notebookId": "$items.Notebook.run.$id" }
+- Plain CTAS works with these options (the earlier "CTAS unsupported" limitation is resolved).
+- Use int `0`/`1`, not bool `false`/`true`: dbt-duckdb silently drops boolean-false attach options.
+- DuckDB extensions (`azure`, `iceberg`, `avro`) load from the **stable** core repo via profiles
+  `extensions:` — no `FORCE INSTALL ... FROM core_nightly` anywhere. Requires `duckdb>=1.5.4`.
 
-// CORRECT — use dev GUIDs, let parameter.yml replace them
-{ "workspaceId": "e446a5e7-6666-42ad-a331-0bfef3187fbf", "notebookId": "da888b35-..." }
-```
+## Notebook (`fabric_items/run.Notebook`)
 
-### $items token format
-Required format: `$items.type.name.$attribute`
-```yaml
-$items.Lakehouse.data.$id    # correct — type=Lakehouse, name=data
-$items.Notebook.run.$id      # correct — type=Notebook, name=run
-$items.data.$id              # wrong — "Invalid $items variable syntax"
-```
-
-### is_regex must be a string
-```yaml
-is_regex: "true"   # correct
-is_regex: true     # wrong — Fabric CLI rejects with "not of type string"
-```
-
-### _ALL_ is the correct universal environment key
-```yaml
-replace_value:
-  _ALL_: "$workspace.id"   # applies to any target environment
-```
-
-## fab deploy config YAML
-
-### Key is item_types_in_scope (plural)
-```yaml
-item_types_in_scope:   # correct (plural)
-  - Notebook
-  - Lakehouse
-
-item_type_in_scope:    # wrong (singular) — silently ignored, deploys everything
-  - Notebook
-```
-
-## Deploy order for Direct Lake semantic models
-
-Direct Lake validation requires Delta tables to exist before the semantic model is deployed.
-Split into two phases using two config files:
-
-**fab_deploy.yml** — Notebook + Lakehouse
-**fab_deploy_sm.yml** — SemanticModel + DataPipeline
-
-Deploy sequence in deploy.py:
-1. `fab deploy` Lakehouse (must exist before Notebook so `$items.Lakehouse.data.$id` resolves)
-2. `fab deploy` Notebook (now the Lakehouse token resolves)
-3. Copy dbt files to OneLake
-3. `fab job run prod.Workspace/run.Notebook -i '{}'` — runs notebook synchronously, creates Delta tables
-4. `fab deploy --config fab_deploy_sm.yml` (SemanticModel + DataPipeline)
-5. Schedule pipeline if not already scheduled
-
-## OneLake Iceberg Write Support (Experimental)
-
-OneLake's Iceberg write support is experimental and has two important limitations:
-
-- **CTAS is not supported** — `CREATE TABLE AS SELECT` statements fail; use `CREATE TABLE IF NOT EXISTS` followed by `INSERT INTO` instead.
-- **Flaky / unreliable** — writes can fail intermittently; always wrap Iceberg write operations in a retry loop.
-
-## fab job run for notebooks
-Notebooks require `-i '{}'` (empty input JSON), otherwise the command does nothing:
-```bash
-fab job run prod.Workspace/run.Notebook -i '{}'   # correct
-fab job run prod.Workspace/run.Notebook            # does nothing for notebooks
-```
+Cell 0 installs `dbt-duckdb` + `duckdb>=1.5.4` then `notebookutils.session.restartPython()` — the
+Fabric runtime preloads an older duckdb binary, so the restart is required before dbt imports it.
+The local-dev branch hardcodes the workspace/lakehouse GUIDs (no `deploy_config.yml`).

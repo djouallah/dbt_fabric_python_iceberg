@@ -7,6 +7,10 @@ aemo_electricity:
       database: onelake
       threads: 1
       schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
+      extensions:
+        - azure
+        - iceberg
+        - avro
       settings:
         preserve_insertion_order: false
       secrets:
@@ -21,5 +25,7 @@ aemo_electricity:
           options:
             endpoint: "{{ env_var('ONELAKE_ENDPOINT') }}"
             token: "{{ env_var('ONELAKE_TOKEN') }}"
-            support_stage_create: 0
+            access_delegation_mode: 'none'
+            stage_create_tables: 0
+            skip_create_table_metadata_updates: 1
             default_schema: dbo

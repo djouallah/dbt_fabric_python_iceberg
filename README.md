@@ -1,4 +1,4 @@
-# ⚠️ HIGHLY EXPERIMENTAL — MAY KILL A DUCK 🦆💀
+# ⚠️ Experimental 🦆
 
 > [!CAUTION]
 > **This is not for production systems. Experimental and educational purposes only.**
@@ -21,31 +21,26 @@ Concretely, for OneLake:
 - `FOLDER_PATH` = `abfss://{workspace_id}@onelake.dfs.fabric.microsoft.com/{lakehouse_id}/Files`
 - `TOKEN` = bearer token from `notebookutils.credentials.getToken('storage')` (in Fabric) or `az login --scope https://storage.azure.com/.default` (locally — `AzureCliCredential` picks it up automatically, no secrets to manage)
 
-Use the IDs, not the names. With friendly names in the URLs, OneLake's auto-generated Delta metadata silently doesn't get produced for the written tables — probably a temporary bug, but GUIDs sidestep it entirely. `deploy_config.yml` stores the workspace GUID under `ws`; the workspace display name is resolved at deploy time via `fab api -X get workspaces/{ws}`. Inside Fabric the notebook resolves the lakehouse GUID via `notebookutils.lakehouse.get(lakehouse_name).id`; outside Fabric the `local` section of `deploy_config.yml` holds both GUIDs directly.
+Use the IDs, not the names. With friendly names in the URLs, OneLake's auto-generated Delta metadata silently doesn't get produced for the written tables — probably a temporary bug, but GUIDs sidestep it entirely. `deploy.py` hardcodes the workspace GUID and resolves the display name at deploy time via `duckrun.workspace(ws).display_name`. Inside Fabric the notebook resolves the lakehouse GUID via `notebookutils.lakehouse.get(lakehouse_name).id`; outside Fabric the notebook hardcodes both GUIDs directly.
 
 You can run the notebook anywhere — I've used it on my laptop, GitHub, Colab (why not) — but running inside Fabric just gives you in-region latency, no egress, a scheduler, and automatic token handling.
 
 
-### Limitations
-
-- **Direct Lake reads** work via OneLake's auto-generated Delta metadata, but generation is asynchronous, so freshly written data may take a moment to appear as a Delta table.
-- **Table maintenance is on you** — compaction, snapshot expiry, etc. PyIceberg is a reasonable place to start.
-- **DuckDB 1.4.4** specifically — other versions will not work against the OneLake catalog.
-- **Force install `avro` from `core_nightly`**.
-- **Must set `support_stage_create: 0`** in the Iceberg attach options.
-
 ## dbt Iceberg configuration
 
-In `profiles.yml`, all targets attach OneLake as an Iceberg catalog:
+In `profiles.yml`, the target attaches OneLake as an Iceberg catalog. Extensions (`azure`, `iceberg`, `avro`) load from the **stable** core repo — no `core_nightly`:
 
 ```yaml
+extensions:
+  - azure
+  - iceberg
 settings:
   preserve_insertion_order: false
-precommand:
-  - "FORCE INSTALL iceberg FROM core_nightly"
-  - "FORCE INSTALL azure FROM core_nightly"
-  - "FORCE INSTALL avro FROM core_nightly"
-  - "CREATE OR REPLACE SECRET onelake_storage (TYPE AZURE, PROVIDER ACCESS_TOKEN, ACCESS_TOKEN '{{ env_var('ONELAKE_TOKEN') }}')"
+secrets:
+  - type: azure
+    name: onelake_storage
+    provider: access_token
+    access_token: "{{ env_var('ONELAKE_TOKEN') }}"
 attach:
   - path: "{{ env_var('WAREHOUSE_PATH') }}"
     alias: onelake
@@ -53,7 +48,9 @@ attach:
     options:
       endpoint: "{{ env_var('ONELAKE_ENDPOINT') }}"
       token: "{{ env_var('ONELAKE_TOKEN') }}"
-      support_stage_create: 0
+      access_delegation_mode: 'none'
+      stage_create_tables: 0
+      skip_create_table_metadata_updates: 1
       default_schema: dbo
 ```
 
@@ -64,16 +61,17 @@ attach:
 
 ---
 
-## Manual deploy from laptop using Fabric CLI
+## Manual deploy from laptop
 
 ```bash
 az login
-python deploy.py --env main
+pip install duckrun
+python deploy.py
 ```
 
 All you need:
 - [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) — `az login` uses your own identity, whatever access you have in Fabric is what the deploy gets
-- [Microsoft Fabric CLI](https://microsoft.github.io/fabric-cli/) (`pip install ms-fabric-cli`)
+- [`duckrun`](https://pypi.org/project/duckrun/) (`pip install duckrun`) — the deploy library; it self-acquires its own Fabric/OneLake tokens
 
 No service principal, no app registration, no secrets — that whole song-and-dance is only for the CI path below.
 
@@ -88,18 +86,18 @@ GitHub Push
     │
     ▼
 GitHub Actions CI
-    ├── dbt run   (DuckDB + OneLake Iceberg, test workspace)
-    └── dbt test  (validates Iceberg table row counts)
+    ├── duckrun    → provision Lakehouse (with schemas)
+    ├── dbt run    (DuckDB + OneLake Iceberg)
+    ├── dbt test   (validates Iceberg table row counts)
+    └── dbt docs   → GitHub Pages
     │
-    ▼
-deploy.py (Fabric CLI + Power BI API)
-    ├── fab create  → Lakehouse (with schemas)
-    ├── fab deploy  → Notebook
-    ├── Copy dbt/   → OneLake Files
-    ├── fab job run → Notebook runs dbt, writes Iceberg tables to OneLake
-    ├── fab deploy  → Semantic Model (Direct Lake, GUIDs swapped)
-    ├── Power BI API → Refresh semantic model
-    └── fab deploy  → Data Pipeline + cron schedule
+    ▼ (main only)
+deploy.py (duckrun)
+    ├── Copy dbt/        → OneLake Files
+    └── ws.deploy(...)   → Variable Library, Notebook, Semantic Model
+        │                  (Direct Lake bim rebound + refreshed), Data Pipeline
+        │                  (notebook activity repointed)
+        └── ws.schedule → cron schedule on the pipeline
 ```
 
 ![Fabric workspace after deploy: semantic model, lakehouse, variable library, notebook, and pipeline](items.png)
@@ -114,20 +112,20 @@ deploy.py (Fabric CLI + Power BI API)
 | Storage | OneLake (Iceberg / Parquet) |
 | Serving | Direct Lake semantic model (Power BI) |
 | CI | GitHub Actions |
-| Deploy | Fabric CLI (`ms-fabric-cli`) |
+| Deploy | `duckrun` |
 
 ### Environments
 
-| Target | Warehouse | Token source | Use case |
-|--------|-----------|--------------|----------|
-| `dev` | Test workspace on OneLake | `az login` (AzureCliCredential) | Local development |
-| `ci` | Test workspace on OneLake | OIDC federated credential (no stored secret) | GitHub Actions |
-| `prod` | Prod workspace on OneLake | notebookutils | Fabric notebook |
+| Context | Token source | Use case |
+|---------|--------------|----------|
+| Local | `az login` (AzureCliCredential) | Local development |
+| GitHub Actions | OIDC federated credential (no stored secret) | CI + deploy on `main` |
+| Fabric notebook | `notebookutils` | Scheduled pipeline run |
 
 ### Configuration files
 
-- `deploy_config.yml` — workspace ID, schedule, and settings per environment
-- `profiles.yml` — dbt targets with Iceberg attach config
+- `deploy.py` — hardcoded workspace/lakehouse constants + the duckrun deploy flow
+- `profiles.yml` — dbt target with Iceberg attach config
 - `dbt_project.yml` — model config and variable defaults
 
 ### CI/CD setup (GitHub Actions)
@@ -138,9 +136,9 @@ The only GitHub secrets you need:
 - `AZURE_CLIENT_ID` — your Azure AD app registration
 - `AZURE_TENANT_ID` — your tenant
 
-On the Azure side, register an app and add a **federated credential** with subject `repo:<owner>/<repo>:ref:refs/heads/main` (and one per deploy branch). Grant it the Fabric workspace permissions you need.
+On the Azure side, register an app and add a **federated credential** with subject `repo:<owner>/<repo>:ref:refs/heads/main`. Grant it the Fabric workspace permissions you need.
 
-Push to `main` runs CI tests and publishes dbt docs to GitHub Pages. Push to `production` deploys to Fabric.
+Every branch runs the dbt build (run/test/docs) and publishes docs to GitHub Pages. Only pushes to `main` deploy the Fabric items (`deploy.py` is hardcoded to one workspace).
 
 ---
 
@@ -150,4 +148,4 @@ Push to `main` runs CI tests and publishes dbt docs to GitHub Pages. Push to `pr
 - **Emit `timestamptz`, not `timestamp`.** Naive `TIMESTAMP` maps to Delta `timestamp_ntz`, which Microsoft docs flag as "not fully supported across Fabric workloads." `CAST(... AS TIMESTAMPTZ)` at output columns.
 - **No DELETE on iceberg.** duckdb-iceberg only writes position-delete files (merge-on-read), and OneLake's virtualization can't read them. `TRUNCATE` goes through the same codepath. Stick to `materialized='incremental'` + `incremental_strategy='append'`, no DELETE pre_hooks.
 - **One iceberg table per OneLake folder.** You can't get Delta if two iceberg tables share the same location — the spec allows it, but it's bad practice anyway.
-- **No Python compaction tool yet.** AFAIK PyIceberg only supports snapshot expiration.
+- **No Python compaction tool yet.** AFAIK PyIceberg only supports snapshot expiration, and upcoming improvemements in duckdb 2
