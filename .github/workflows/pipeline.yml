@@ -8,6 +8,10 @@ on:
       - "fabric_items/**"
       - "deploy.py"
       - ".github/workflows/**"
+  schedule:
+    # Every 6 hours (00:00/06:00/12:00/18:00 UTC) — refresh the AEMO data.
+    # Scheduled runs are data-only (Phase 5 deploy is skipped; see below).
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -34,10 +38,11 @@ env:
   WS_ID: ea575278-bd81-459c-9680-47829898c902
   LH_NAME: data
   FOLDER: aemo
-  # CI's own dbt run only — deliberately smaller than the limits deploy.py injects into the
-  # Variable Library for the in-Fabric notebook run.
-  CI_DOWNLOAD_LIMIT: "6"
-  CI_PROCESS_LIMIT: "2"
+  # Files fetched (download) and turned into fact rows (process) per feed per run. Sized to cover
+  # a 6-hour window of 5-min intraday files (~72/feed) plus headroom, so the 6-hourly schedule keeps
+  # the AEMO data current.
+  CI_DOWNLOAD_LIMIT: "80"
+  CI_PROCESS_LIMIT: "80"
 
 jobs:
   pipeline:
@@ -139,11 +144,11 @@ jobs:
         # branches still run Phases 1-4 to validate the dbt build.
         run: |
           T0=$(date +%s)
-          if [ "${{ github.ref_name }}" = "main" ]; then
+          if [ "${{ github.ref_name }}" = "main" ] && [ "${{ github.event_name }}" != "schedule" ]; then
             python deploy.py
             echo "DEPLOY_SKIPPED=false" >> "$GITHUB_ENV"
           else
-            echo "::notice::Branch '${{ github.ref_name }}' is not main — skipping Fabric item deploy."
+            echo "::notice::Skipping Fabric item deploy — only push/dispatch to main deploys; scheduled and non-main runs are data-only."
             echo "DEPLOY_SKIPPED=true" >> "$GITHUB_ENV"
           fi
           echo "T_DEPLOY=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
@@ -263,7 +268,7 @@ jobs:
           print(f"| 🏢 Workspace | `{ws}` |")
           print(f"| 🏠 Lakehouse | `{lh}` _({lh_action})_ |")
           if env('DEPLOY_SKIPPED') == 'true':
-              print(f"\n_Deploy skipped — branch `{branch}` is not `main`_")
+              print(f"\n_Deploy skipped — data-only run (deploy happens on push/dispatch to `main`)_")
           else:
               emojis = {
                   'Lakehouse': '🏠', 'Notebook': '📓', 'SemanticModel': '📊',
