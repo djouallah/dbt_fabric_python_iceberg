@@ -144,14 +144,27 @@ Every branch runs the dbt build (run/test/docs) and publishes docs to GitHub Pag
 
 ## Limitations
 
-DuckDB's Iceberg **writer** is brand new and under heavy development — writes only landed recently and much of this is expected to be smoothed over in **DuckDB 2.0**. Treat everything below as "true today, likely to improve soon", not as permanent design constraints.
+DuckDB's Iceberg **writer** is new and under heavy development — it gained full DML only recently and more is landing in **DuckDB 2.0**. Treat everything below as "true today, likely to improve soon", not as permanent design constraints.
 
-- **Needs DuckDB ≥ 1.5.4.** The OneLake-Iceberg write bug is only fixed from 1.5.4 on; older versions can't write to the catalog reliably. (The pin used to be 1.4.4 with `core_nightly` extensions — no longer needed.)
-- **Append-only writes — no DELETE / UPDATE / MERGE.** duckdb-iceberg only writes position-delete files (merge-on-read), which OneLake's Iceberg→Delta virtualization can't read. `TRUNCATE` goes through the same codepath. Stick to `materialized='incremental'` + `incremental_strategy='append'`; do dedup/rebuild in SQL, not with DELETE pre-hooks.
-- **CTAS needs specific attach options.** Plain `CREATE TABLE AS SELECT` only works with `access_delegation_mode: 'none'`, `stage_create_tables: 0`, and `skip_create_table_metadata_updates: 1` set on the Iceberg attach — earlier the staged-create path rejected CTAS outright.
-- **No table maintenance from DuckDB.** No compaction / `OPTIMIZE` / snapshot expiry. You handle it out-of-band (PyIceberg is a start, but today it only does snapshot expiration).
-- **No disk spilling unless you configure it.** With `path: ':memory:'` and no `temp_directory`/`memory_limit`, a large aggregation grows until the process is OOM-killed instead of spilling. Set `memory_limit` + `temp_directory` (see `profiles.yml`).
-- **Emit `timestamptz`, not `timestamp`.** Naive `TIMESTAMP` maps to Delta `timestamp_ntz`, which Microsoft docs flag as "not fully supported across Fabric workloads." `CAST(... AS TIMESTAMPTZ)` at output columns.
-- **One Iceberg table per OneLake folder.** You can't get Delta if two Iceberg tables share a location — the spec allows it, but OneLake's virtualization identifies tables by directory.
+### DuckDB Iceberg writer
+
+Full DML works as of **v1.5.3** (May 2026): `CREATE TABLE`, `CTAS`, `INSERT`, `UPDATE`, `DELETE`, `MERGE INTO`, and `ALTER TABLE` (schema evolution — add/drop/rename/retype columns), plus `bucket`/`truncate` partition transforms and Iceberg V3. The remaining caveats:
+
+- **Merge-on-read only.** `UPDATE`/`DELETE`/`MERGE` write positional delete files; copy-on-write is not supported. A table whose `write.update.mode` or `write.delete.mode` is set to anything other than `merge-on-read` will fail the operation. Delete files accumulate, so periodic maintenance matters.
+- **No built-in table maintenance.** No compaction / `OPTIMIZE` / snapshot expiry from DuckDB — do it out-of-band (PyIceberg does snapshot expiration today).
+- **Writing requires an attached REST catalog.** The path-based `iceberg_scan` interface is read-only.
+- **Partitioned tables** don't honor `write.target-file-size-bytes` or `write.parquet.row-group-size-bytes`.
+- **`Geography` and `Unknown` types** aren't supported yet — planned for DuckDB 2.0.
+- **Needs DuckDB ≥ 1.5.4** for OneLake: the write bug is fixed there, and 1.5.3 is where `MERGE`/`ALTER TABLE` landed. (The pin used to be 1.4.4 with `core_nightly` extensions — no longer needed.)
+
+> This repo still uses `incremental_strategy='append'` with dedup-in-SQL by **choice** — it skips the target-table scan a `merge` does — not because `merge` is unavailable.
+
+### OneLake / Fabric round-trip
+
+- **CTAS needs specific attach options.** Plain `CREATE TABLE AS SELECT` against OneLake works with `access_delegation_mode: 'none'`, `stage_create_tables: 0`, and `skip_create_table_metadata_updates: 1` on the Iceberg attach.
 - **Use GUIDs in OneLake URLs, not friendly names.** With names, OneLake silently doesn't produce Delta metadata for the tables you write — probably a temporary bug; GUIDs work around it today.
+- **One Iceberg table per OneLake folder.** You can't get Delta if two Iceberg tables share a location — the spec allows it, but OneLake's virtualization identifies tables by directory.
+- **Emit `timestamptz`, not `timestamp`.** Naive `TIMESTAMP` maps to Delta `timestamp_ntz`, which Microsoft docs flag as "not fully supported across Fabric workloads." `CAST(... AS TIMESTAMPTZ)` at output columns.
 - **Delta metadata generation is asynchronous.** Freshly written data may take a moment to surface as a Delta table for Direct Lake reads.
+
+> **Operational note:** the `:memory:` DuckDB needs `memory_limit` + `temp_directory` set (see `profiles.yml`) so large aggregations spill to disk instead of getting OOM-killed.
