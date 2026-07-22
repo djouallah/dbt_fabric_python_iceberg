@@ -4,9 +4,9 @@ import duckrun
 WORKSPACE      = "ea575278-bd81-459c-9680-47829898c902"   # analytics workspace
 LAKEHOUSE      = "data"
 FOLDER         = "aemo"          # workspace folder new items land in
-SCHEDULE_EVERY = "720m"          # pipeline cadence — runs alongside the 6-hourly CI cron by
-                                 # design (demo of in-Fabric scheduling); overlap safety comes
-                                 # from insert-only keyed merges + the assert_*_grain tripwires
+SCHEDULE_EVERY = "720m"          # unused while the Fabric scheduler is off — CI (hourly cron)
+                                 # is the only scheduled writer; re-enable step 4 below to
+                                 # bring the in-Fabric schedule back
 DOWNLOAD_LIMIT = "5"             # limits injected into the Variable Library (in-Fabric notebook run)
 PROCESS_LIMIT  = "100"
 
@@ -41,8 +41,11 @@ ws.deploy("fabric_items", lakehouse=LAKEHOUSE, folder=FOLDER, overwrite=True, va
     "workspace_id":   ws.id,
 })
 
-# 4. Schedule the pipeline (idempotent — updates, never stacks duplicates)
-print("[4/4] Scheduling pipeline...")
-ws.schedule("run_pipeline", every=SCHEDULE_EVERY)
+# 4. Fabric pipeline scheduling — intentionally DISABLED (turned off in the workspace;
+#    CI's hourly cron is the only scheduled writer). Deploy must not re-arm it.
+#    Re-enable by uncommenting:
+# print("[4/4] Scheduling pipeline...")
+# ws.schedule("run_pipeline", every=SCHEDULE_EVERY)
+print("[4/4] Fabric scheduler intentionally left off (CI cron is the scheduled writer)")
 
 print("=== Deploy complete ===")

@@ -9,13 +9,13 @@ on:
       - "deploy.py"
       - ".github/workflows/**"
   schedule:
-    # Every 6 hours (00:00/06:00/12:00/18:00 UTC) — refresh the AEMO data.
-    # Scheduled runs are data-only (Phase 5 deploy is skipped; see below).
-    # Intentionally coexists with the in-Fabric pipeline deploy.py schedules every 12h. All
-    # incremental models write insert-only keyed merges (single append snapshot per commit —
-    # the OneLake catalog's limit), so overlapping runs dedupe on the key; the
+    # Hourly — refresh the AEMO data. Scheduled runs are data-only (Phase 5 deploy is
+    # skipped; see below). CI is the ONLY scheduled writer: the in-Fabric pipeline
+    # scheduler is turned off (and deploy.py no longer re-arms it). All incremental
+    # models write insert-only keyed merges (single append snapshot per commit — the
+    # OneLake catalog's limit), so even overlapping runs dedupe on the key; the
     # assert_*_grain tests are the duplicate tripwire.
-    - cron: "0 */6 * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -45,9 +45,9 @@ env:
   WS_ID: ea575278-bd81-459c-9680-47829898c902
   LH_NAME: data
   FOLDER: aemo
-  # Files fetched (download) and turned into fact rows (process) per feed per run. Sized to cover
-  # a 6-hour window of 5-min intraday files (~72/feed) plus headroom, so the 6-hourly schedule keeps
-  # the AEMO data current. Other contexts size this pair differently on purpose — see the
+  # Files fetched (download) and turned into fact rows (process) per feed per run. An hourly
+  # window is only ~12 intraday files/feed, so 80 leaves plenty of headroom for catch-up and
+  # the historical backfill. Other contexts size this pair differently on purpose — see the
   # comment block in deploy.py for the full map (deploy 5/100, variables.json placeholders,
   # notebook local-dev 2/1000).
   CI_DOWNLOAD_LIMIT: "80"
