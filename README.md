@@ -161,7 +161,6 @@ Full DML works as of **v1.5.3** (May 2026): `CREATE TABLE`, `CTAS`, `INSERT`, `U
 
 ### OneLake / Fabric round-trip
 
-- **CTAS needs specific attach options.** Plain `CREATE TABLE AS SELECT` against OneLake works with `access_delegation_mode: 'none'`, `stage_create_tables: 0`, and `skip_create_table_metadata_updates: 1` on the Iceberg attach.
 - **Use GUIDs in OneLake URLs, not friendly names.** With names, OneLake silently doesn't produce Delta metadata for the tables you write — probably a temporary bug; GUIDs work around it today.
 - **One Iceberg table per OneLake folder.** You can't get Delta if two Iceberg tables share a location — the spec allows it, but OneLake's virtualization identifies tables by directory.
 - **Emit `timestamptz`, not `timestamp`.** Naive `TIMESTAMP` maps to Delta `timestamp_ntz`, which Microsoft docs flag as "not fully supported across Fabric workloads." `CAST(... AS TIMESTAMPTZ)` at output columns.
