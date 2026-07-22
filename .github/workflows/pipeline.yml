@@ -11,9 +11,10 @@ on:
   schedule:
     # Every 6 hours (00:00/06:00/12:00/18:00 UTC) — refresh the AEMO data.
     # Scheduled runs are data-only (Phase 5 deploy is skipped; see below).
-    # Intentionally coexists with the in-Fabric pipeline deploy.py schedules every 12h: both
-    # writers are safe to overlap because the incremental models use keyed strategies
-    # (merge/delete+insert on unique_key), not blind appends.
+    # Intentionally coexists with the in-Fabric pipeline deploy.py schedules every 12h. The
+    # facts merge on unique_key (new files only), fct_summary appends behind a truncate;
+    # overlapping commits rely on the Iceberg catalog's optimistic concurrency, and the
+    # assert_*_grain tests are the duplicate tripwire.
     - cron: "0 */6 * * *"
   workflow_dispatch:
 

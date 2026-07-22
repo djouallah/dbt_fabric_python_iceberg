@@ -5,8 +5,8 @@ WORKSPACE      = "ea575278-bd81-459c-9680-47829898c902"   # analytics workspace
 LAKEHOUSE      = "data"
 FOLDER         = "aemo"          # workspace folder new items land in
 SCHEDULE_EVERY = "720m"          # pipeline cadence — runs alongside the 6-hourly CI cron by
-                                 # design (demo of in-Fabric scheduling); safe because the
-                                 # incremental models write with keyed strategies, not appends
+                                 # design (demo of in-Fabric scheduling); overlap safety comes
+                                 # from keyed fact merges + the assert_*_grain test tripwires
 DOWNLOAD_LIMIT = "5"             # limits injected into the Variable Library (in-Fabric notebook run)
 PROCESS_LIMIT  = "100"
 

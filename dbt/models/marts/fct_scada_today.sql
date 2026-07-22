@@ -1,3 +1,6 @@
+-- merge is effectively insert-only here (the pre_hook prefilters unseen files); a
+-- matched UPDATE would be rejected by the OneLake catalog's one-snapshot-per-commit
+-- rule -- see the fct_summary.sql header for the full story.
 {{ config(
     materialized='incremental',
     incremental_strategy='merge',

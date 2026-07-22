@@ -1,17 +1,18 @@
 -- depends_on: {{ ref('fct_scada_today') }}
 -- depends_on: {{ ref('fct_price_today') }}
 
--- Keyed merge on (date, time, DUID) so overlapping writers (6h CI cron + 12h Fabric
--- pipeline) upsert instead of double-appending; Iceberg has no enforced PKs, so truly
--- simultaneous commits still rely on the REST catalog's optimistic concurrency.
--- The full-rebuild branch regenerates every key and the merge replaces rows in place
--- (no TRUNCATE needed). Caveat: keys that drop out of a rebuild (e.g. a row newly
--- filtered by INITIALMW <> 0) linger until a `dbt run --full-refresh`.
+-- Why append + out-of-transaction TRUNCATE instead of merge/delete+insert on the
+-- (date, time, DUID) grain: the OneLake Iceberg REST catalog allows only ONE
+-- add-snapshot update per commit ("Only one instance of each update type is allowed
+-- per request"), and a DuckDB MERGE/DELETE+INSERT that actually touches existing rows
+-- emits two snapshots in one commit -> BadRequest 400. Until that changes, the
+-- rebuild branch truncates in its own commit (transaction: false) and appends in the
+-- next; assert_fct_summary_grain is the duplicate tripwire.
 {{ config(
     materialized='incremental',
-    incremental_strategy='merge',
-    unique_key=['date', 'time', 'DUID'],
-    schema='mart'
+    incremental_strategy='append',
+    schema='mart',
+    pre_hook=[{"sql": "{% if is_incremental() and execute and flags.WHICH == 'run' %}{%- set r = run_query('SELECT (SELECT COUNT(DISTINCT DATE) FROM ' ~ ref('fct_scada') ~ ' WHERE INTERVENTION = 0) AS s, (SELECT COUNT(DISTINCT date) FROM ' ~ this ~ ') AS m') -%}{%- if r and r.rows[0][0] > r.rows[0][1] -%}TRUNCATE TABLE {{ this }}{%- endif -%}{% endif %}", "transaction": false}]
 ) }}
 
 {% if is_incremental() %}
