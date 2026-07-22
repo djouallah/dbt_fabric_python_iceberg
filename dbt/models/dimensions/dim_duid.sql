@@ -10,7 +10,7 @@
   WHERE DUID NOT IN (SELECT DUID FROM {{ this }})
 {%- endset -%}
 
-{%- if execute and is_incremental() and flags.WHICH == 'run' -%}
+{%- if execute and is_incremental() and flags.WHICH in ('run', 'build', 'retry') -%}
   {%- set result = run_query(check_new_duids_query) -%}
   {%- set has_new_duids = result and result.rows[0][0] > 0 -%}
 {%- else -%}

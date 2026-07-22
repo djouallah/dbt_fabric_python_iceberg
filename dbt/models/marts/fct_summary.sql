@@ -28,7 +28,7 @@ SELECT
   (SELECT COUNT(DISTINCT date) FROM {{ this }}) as summary_days
 {%- endset -%}
 
-{%- if execute and flags.WHICH == 'run' -%}
+{%- if execute and flags.WHICH in ('run', 'build', 'retry') -%}
   {%- set result = run_query(has_new_daily_query) -%}
   {%- set has_new_daily = result and result.rows[0][0] > result.rows[0][1] -%}
 {%- else -%}

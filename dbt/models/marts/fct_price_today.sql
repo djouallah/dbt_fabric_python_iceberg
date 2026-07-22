@@ -20,7 +20,7 @@ AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
 {%- endif -%}
 {%- endset -%}
 
-{%- if execute and flags.WHICH == 'run' -%}
+{%- if execute and flags.WHICH in ('run', 'build', 'retry') -%}
   {%- set files_result = run_query(check_files_query) -%}
   {%- set has_files = files_result and files_result.rows[0][0] > 0 -%}
 {%- else -%}
