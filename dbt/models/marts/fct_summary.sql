@@ -1,11 +1,17 @@
 -- depends_on: {{ ref('fct_scada_today') }}
 -- depends_on: {{ ref('fct_price_today') }}
 
+-- Keyed merge on (date, time, DUID) so overlapping writers (6h CI cron + 12h Fabric
+-- pipeline) upsert instead of double-appending; Iceberg has no enforced PKs, so truly
+-- simultaneous commits still rely on the REST catalog's optimistic concurrency.
+-- The full-rebuild branch regenerates every key and the merge replaces rows in place
+-- (no TRUNCATE needed). Caveat: keys that drop out of a rebuild (e.g. a row newly
+-- filtered by INITIALMW <> 0) linger until a `dbt run --full-refresh`.
 {{ config(
     materialized='incremental',
-    incremental_strategy='append',
-    schema='mart',
-    pre_hook=[{"sql": "{% if is_incremental() and execute and flags.WHICH == 'run' %}{%- set r = run_query('SELECT (SELECT COUNT(DISTINCT DATE) FROM ' ~ ref('fct_scada') ~ ' WHERE INTERVENTION = 0) AS s, (SELECT COUNT(DISTINCT date) FROM ' ~ this ~ ') AS m') -%}{%- if r and r.rows[0][0] > r.rows[0][1] -%}TRUNCATE TABLE {{ this }}{%- endif -%}{% endif %}", "transaction": false}]
+    incremental_strategy='merge',
+    unique_key=['date', 'time', 'DUID'],
+    schema='mart'
 ) }}
 
 {% if is_incremental() %}
