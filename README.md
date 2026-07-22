@@ -149,7 +149,6 @@ Full DML works as of **v1.5.3** (May 2026): `CREATE TABLE`, `CTAS`, `INSERT`, `U
 
 - **Merge-on-read only.** `UPDATE`/`DELETE`/`MERGE` write positional delete files; copy-on-write is not supported. A table whose `write.update.mode` or `write.delete.mode` is set to anything other than `merge-on-read` will fail the operation. Delete files accumulate, so periodic maintenance matters.
 - **No built-in table maintenance.** No compaction / `OPTIMIZE` / snapshot expiry from DuckDB — do it out-of-band (PyIceberg does snapshot expiration today).
-- **Writing requires an attached REST catalog.** The path-based `iceberg_scan` interface is read-only.
 - **Partitioned tables** don't honor `write.target-file-size-bytes` or `write.parquet.row-group-size-bytes`.
 - **`Geography` and `Unknown` types** aren't supported yet — planned for DuckDB 2.0.
 - **Needs DuckDB ≥ 1.5.4** for OneLake: the write bug is fixed there, and 1.5.3 is where `MERGE`/`ALTER TABLE` landed. (The pin used to be 1.4.4 with `core_nightly` extensions — no longer needed.)
