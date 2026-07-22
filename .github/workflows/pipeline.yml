@@ -43,7 +43,9 @@ env:
   FOLDER: aemo
   # Files fetched (download) and turned into fact rows (process) per feed per run. Sized to cover
   # a 6-hour window of 5-min intraday files (~72/feed) plus headroom, so the 6-hourly schedule keeps
-  # the AEMO data current.
+  # the AEMO data current. Other contexts size this pair differently on purpose — see the
+  # comment block in deploy.py for the full map (deploy 5/100, variables.json placeholders,
+  # notebook local-dev 2/1000).
   CI_DOWNLOAD_LIMIT: "80"
   CI_PROCESS_LIMIT: "80"
 
