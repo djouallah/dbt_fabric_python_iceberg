@@ -28,6 +28,8 @@
 
 {% if has_new_duids %}
 WITH
+  -- Deliberately an inline CTE, not a seed: 7 static rows aren't worth a
+  -- materialized Iceberg table + a `dbt seed` step in every runner.
   states AS (
     SELECT 'WA1' AS RegionID, 'Western Australia' AS State
     UNION ALL SELECT 'QLD1', 'Queensland'

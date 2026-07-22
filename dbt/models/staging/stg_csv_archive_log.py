@@ -133,12 +133,12 @@ def model(dbt, session):
                     csv_base = csv_name.removesuffix(".gz").removesuffix(".CSV").removesuffix(".csv")
                     dest = f"{csv_archive_path}/{subfolder}/{csv_name}"
                     copy_to_onelake(temp_path, dest)
-                    session.sql(f"""
-                        INSERT INTO _csv_archive_log VALUES (
-                            '{source_type}', '{src_fn}', '/{subfolder}/{csv_name}',
-                            '{now}'::TIMESTAMPTZ, NULL, '{url}', NULL, '{csv_base}'
-                        )
-                    """)
+                    # Parameterized so odd characters in filenames/URLs can't break the SQL
+                    session.execute(
+                        "INSERT INTO _csv_archive_log VALUES "
+                        "(?, ?, ?, CAST(? AS TIMESTAMPTZ), NULL, ?, NULL, ?)",
+                        [source_type, src_fn, f"/{subfolder}/{csv_name}", now, url, csv_base],
+                    )
             save_log()
 
     # =========================================================================
@@ -288,6 +288,8 @@ def model(dbt, session):
         (
             "duid_data",
             "duid_data",
+            # NOTE: pinned to a patch branch of djouallah/aemo_fabric — deleting that
+            # branch breaks dim_duid. Merge it to main (or vendor the CSV) eventually.
             "https://raw.githubusercontent.com/djouallah/aemo_fabric/refs/heads/djouallah-patch-1/duid_data.csv",
             "duid_data.csv",
         ),
@@ -343,13 +345,11 @@ def model(dbt, session):
         now = datetime.now(timezone.utc).isoformat()
         for source_type, source_filename, url, csv_filename in duid_sources:
             csv_base = csv_filename.rsplit(".", 1)[0]
-            session.sql(f"""
-                INSERT INTO _csv_archive_log VALUES (
-                    '{source_type}', '{source_filename}',
-                    '/duid/{csv_filename}', '{now}'::TIMESTAMPTZ,
-                    NULL, '{url}', NULL, '{csv_base}'
-                )
-            """)
+            session.execute(
+                "INSERT INTO _csv_archive_log VALUES "
+                "(?, ?, ?, CAST(? AS TIMESTAMPTZ), NULL, ?, NULL, ?)",
+                [source_type, source_filename, f"/duid/{csv_filename}", now, url, csv_base],
+            )
 
     # =========================================================================
     # Save log to parquet and return
