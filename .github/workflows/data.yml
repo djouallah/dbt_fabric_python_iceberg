@@ -1,0 +1,114 @@
+name: 🎯 Data Pipeline
+
+# Hourly data refresh — check the lakehouse exists, then dbt build from the GitHub runner.
+# No docs, no deploy: pushes go through pipeline.yml (which deploys Fabric items on main).
+on:
+  schedule:
+    # CI is the ONLY scheduled writer: the in-Fabric pipeline scheduler is turned off
+    # (and deploy.py no longer re-arms it). All incremental models write insert-only
+    # keyed merges (single append snapshot per commit — the OneLake catalog's limit),
+    # so even overlapping runs dedupe on the key; the assert_*_grain tests are the
+    # duplicate tripwire.
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: data-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  # DuckDB's azure extension reads OneLake over a curl transport (its default transport fails
+  # the OneLake TLS handshake) and curl needs the runner's CA bundle.
+  AZURE_TRANSPORT_OPTION_TYPE: curl
+  CURL_CA_INFO: /etc/ssl/certs/ca-certificates.crt
+  ONELAKE_ENDPOINT: https://onelake.table.fabric.microsoft.com/iceberg
+  # Authenticated GitHub API calls for the staging model's backfill listing —
+  # anonymous calls share the runner IP's 60 req/h quota and get rate-limited.
+  GITHUB_TOKEN: ${{ github.token }}
+  # OIDC federated identity — duckrun mints its own Fabric/OneLake tokens from these.
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  # Keep in sync with pipeline.yml / deploy.py.
+  WS_ID: ea575278-bd81-459c-9680-47829898c902
+  LH_NAME: data
+  FOLDER: aemo
+  # Same caps as pipeline.yml — see the comment there.
+  CI_DOWNLOAD_LIMIT: "300"
+  CI_PROCESS_LIMIT: "300"
+
+jobs:
+  data:
+    name: 🎯 Data
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 📦 Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: 🔐 Azure federated login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: 🎟️  Mint OneLake token
+        run: |
+          TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: 🏗️  Check lakehouse
+        # Idempotent create-if-missing, then export the paths/limits the dbt build reads.
+        run: |
+          python - <<'EOF' >> "$GITHUB_ENV"
+          import os, duckrun
+          ws_id, lh_name, folder = os.environ["WS_ID"], os.environ["LH_NAME"], os.environ["FOLDER"]
+          ws = duckrun.workspace(ws_id)
+          lh_id = ws.create_lakehouse(lh_name, folder=folder)   # idempotent, schema-enabled
+          base = f"abfss://{ws_id}@onelake.dfs.fabric.microsoft.com/{lh_id}"
+          print(f"WAREHOUSE_PATH={ws_id}/{lh_id}")
+          print(f"FILES_PATH={base}/Files")
+          print(f"download_limit={os.environ['CI_DOWNLOAD_LIMIT']}")
+          print(f"process_limit={os.environ['CI_PROCESS_LIMIT']}")
+          EOF
+
+      - name: 🔨 dbt build
+        run: |
+          # dbt retry needs run_results.json; a fatal crash (not a model failure) exits before
+          # writing it, so fall back to a full dbt build rather than burning the retry on
+          # "Could not find previous run in 'target'".
+          attempt() {
+            if [ -f dbt/target/run_results.json ]; then
+              dbt retry --target dev --project-dir dbt --profiles-dir dbt
+            else
+              echo "::warning::no run_results.json from previous attempt — falling back to full dbt build"
+              dbt build --target dev --project-dir dbt --profiles-dir dbt --exclude tag:heavy
+            fi
+          }
+          rc=0; dbt build --target dev --project-dir dbt --profiles-dir dbt --exclude tag:heavy || rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "::warning::dbt build had failures — sleeping 60s and retrying (1/2)..."
+            sleep 60
+            rc=0; attempt || rc=$?
+            if [ $rc -ne 0 ]; then
+              echo "::warning::retry 1 still failing — sleeping 90s and retrying (2/2)..."
+              sleep 90
+              rc=0; attempt || rc=$?
+            fi
+          fi
+          # Fail the job if all three attempts failed — a red run must not look green.
+          exit $rc
