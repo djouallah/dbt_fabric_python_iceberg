@@ -11,6 +11,15 @@ on:
     # duplicate tripwire.
     - cron: "0 * * * *"
   workflow_dispatch:
+    inputs:
+      download_limit:
+        description: "Files fetched per feed per run"
+        default: "300"
+        required: false
+      process_limit:
+        description: "Files turned into fact rows per feed per run"
+        default: "300"
+        required: false
 
 concurrency:
   group: data-${{ github.ref_name }}
@@ -36,9 +45,10 @@ env:
   WS_ID: ea575278-bd81-459c-9680-47829898c902
   LH_NAME: data
   FOLDER: aemo
-  # Same caps as pipeline.yml — see the comment there.
-  CI_DOWNLOAD_LIMIT: "300"
-  CI_PROCESS_LIMIT: "300"
+  # Same caps as pipeline.yml — see the comment there. Manual dispatch can override;
+  # scheduled runs have no inputs and fall back to the same 300 defaults.
+  CI_DOWNLOAD_LIMIT: ${{ inputs.download_limit || '300' }}
+  CI_PROCESS_LIMIT: ${{ inputs.process_limit || '300' }}
 
 jobs:
   data:
