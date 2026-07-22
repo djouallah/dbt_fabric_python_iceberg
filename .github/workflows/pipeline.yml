@@ -1,31 +1,29 @@
-name: 🚀 Deploy to Fabric
+name: 🎯 Data Pipeline
 
+# Data-only: check the lakehouse exists, then dbt build from the GitHub runner.
+# Fabric item deploy lives in deploy.yml (manual workflow_dispatch only).
 on:
   push:
     branches: ["**"]
     paths:
       - "dbt/**"
-      - "fabric_items/**"
-      - "deploy.py"
-      - ".github/workflows/**"
+      - ".github/workflows/pipeline.yml"
   schedule:
-    # Hourly — refresh the AEMO data. Scheduled runs are data-only (Phase 5 deploy is
-    # skipped; see below). CI is the ONLY scheduled writer: the in-Fabric pipeline
-    # scheduler is turned off (and deploy.py no longer re-arms it). All incremental
-    # models write insert-only keyed merges (single append snapshot per commit — the
-    # OneLake catalog's limit), so even overlapping runs dedupe on the key; the
-    # assert_*_grain tests are the duplicate tripwire.
+    # Hourly — refresh the AEMO data. CI is the ONLY scheduled writer: the in-Fabric
+    # pipeline scheduler is turned off (and deploy.py no longer re-arms it). All
+    # incremental models write insert-only keyed merges (single append snapshot per
+    # commit — the OneLake catalog's limit), so even overlapping runs dedupe on the
+    # key; the assert_*_grain tests are the duplicate tripwire.
     - cron: "0 * * * *"
   workflow_dispatch:
 
 concurrency:
-  group: deploy-${{ github.ref_name }}
+  group: data-${{ github.ref_name }}
   cancel-in-progress: false
 
 permissions:
   id-token: write
   contents: read
-  pages: write
 
 env:
   # DuckDB's azure extension reads OneLake over a curl transport (its default transport fails
@@ -40,8 +38,8 @@ env:
   AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
   AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
   # Keep in sync with deploy.py's constants (deploy.py is a flat script, so importing it to read
-  # them would run a deploy). FOLDER matters here too: Phase 1 creates the lakehouse on every run
-  # and duckrun only places an item in a folder when it CREATES it.
+  # them would run a deploy). FOLDER matters here too: the lakehouse check creates the lakehouse
+  # when missing and duckrun only places an item in a folder when it CREATES it.
   WS_ID: ea575278-bd81-459c-9680-47829898c902
   LH_NAME: data
   FOLDER: aemo
@@ -59,8 +57,6 @@ jobs:
     name: 🎯 Pipeline
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    outputs:
-      docs_ok: ${{ steps.docs.outcome == 'success' }}
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
@@ -74,8 +70,7 @@ jobs:
       - name: 📦 Install dependencies
         # duckrun brings dbt-duckdb, duckdb>=1.5.4, deltalake, azure-identity and obstore. The
         # Iceberg/azure/avro DuckDB extensions auto-install + auto-load from the stable core repo
-        # on first use (no `extensions:` list anywhere) — no nightly force-install needed now the
-        # OneLake-Iceberg bug is fixed.
+        # on first use (no `extensions:` list anywhere).
         run: pip install -r requirements.txt
 
       - name: 🔐 Azure federated login
@@ -86,139 +81,52 @@ jobs:
           allow-no-subscriptions: true
 
       - name: 🎟️  Mint OneLake token
-        # The Iceberg dbt run (type: duckdb) reads ONELAKE_TOKEN from the env; duckrun (Phase 1 &
-        # 5) self-acquires its own tokens from the Azure CLI credential above.
+        # The Iceberg dbt run (type: duckdb) reads ONELAKE_TOKEN from the env; duckrun
+        # self-acquires its own tokens from the Azure CLI credential above.
         run: |
           TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
           echo "::add-mask::$TOKEN"
           echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
-      - name: 🏗️  Phase 1 — Provision Lakehouse
-        # duckrun creates the (schema-enabled) lakehouse idempotently and resolves its id, then
-        # exports the paths/limits the Iceberg dbt run (Phases 2-4) reads. Runs on every push so
-        # branches without a deploy still get a lakehouse to write to. deploy.py re-ensures it.
+      - name: 🏗️  Check lakehouse
+        # duckrun creates the (schema-enabled) lakehouse idempotently when missing and resolves
+        # its id, then exports the paths/limits the Iceberg dbt build reads.
         run: |
-          T0=$(date +%s)
           python - <<'EOF' >> "$GITHUB_ENV"
           import os, duckrun
           ws_id, lh_name, folder = os.environ["WS_ID"], os.environ["LH_NAME"], os.environ["FOLDER"]
           ws = duckrun.workspace(ws_id)
-          existed = lh_name in [l["displayName"] for l in ws.list_lakehouses()]
           lh_id = ws.create_lakehouse(lh_name, folder=folder)   # idempotent, schema-enabled
           base = f"abfss://{ws_id}@onelake.dfs.fabric.microsoft.com/{lh_id}"
           print(f"WAREHOUSE_PATH={ws_id}/{lh_id}")
           print(f"FILES_PATH={base}/Files")
-          print(f"WS_NAME={ws.display_name}")
-          print(f"LH_ID={lh_id}")
-          print(f"LH_ACTION={'already existed' if existed else 'just created'}")
           print(f"download_limit={os.environ['CI_DOWNLOAD_LIMIT']}")
           print(f"process_limit={os.environ['CI_PROCESS_LIMIT']}")
           EOF
-          echo "T_LAKEHOUSE=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
 
-      - name: 🔨 Phase 2 — dbt run
+      - name: 🔨 dbt build
         run: |
-          T0=$(date +%s)
-          # dbt retry rewrites run_results.json with ONLY the reran nodes, so
-          # snapshot after each attempt and let the summary merge them (later
-          # attempts override earlier per unique_id) for the true final status.
-          snap() { cp dbt/target/run_results.json "/tmp/rr_$1.json" 2>/dev/null || true; }
           # dbt retry needs run_results.json; a fatal crash (not a model failure) exits before
-          # writing it, so fall back to a full dbt run rather than burning the retry on
+          # writing it, so fall back to a full dbt build rather than burning the retry on
           # "Could not find previous run in 'target'".
           attempt() {
             if [ -f dbt/target/run_results.json ]; then
               dbt retry --target dev --project-dir dbt --profiles-dir dbt
             else
-              echo "::warning::no run_results.json from previous attempt — falling back to full dbt run"
-              dbt run --target dev --project-dir dbt --profiles-dir dbt
+              echo "::warning::no run_results.json from previous attempt — falling back to full dbt build"
+              dbt build --target dev --project-dir dbt --profiles-dir dbt --exclude tag:heavy
             fi
           }
-          rc=0; dbt run --target dev --project-dir dbt --profiles-dir dbt || rc=$?
-          snap 0
+          rc=0; dbt build --target dev --project-dir dbt --profiles-dir dbt --exclude tag:heavy || rc=$?
           if [ $rc -ne 0 ]; then
-            echo "::warning::dbt run had failures — sleeping 60s and retrying (1/2)..."
+            echo "::warning::dbt build had failures — sleeping 60s and retrying (1/2)..."
             sleep 60
             rc=0; attempt || rc=$?
-            snap 1
             if [ $rc -ne 0 ]; then
               echo "::warning::retry 1 still failing — sleeping 90s and retrying (2/2)..."
               sleep 90
               rc=0; attempt || rc=$?
-              snap 2
             fi
           fi
-          # Timing is written before the exit so the always() summary still renders it.
-          echo "T_DBT_RUN=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
           # Fail the job if all three attempts failed — a red run must not look green.
           exit $rc
-
-      - name: ✅ Phase 3 — dbt test
-        run: |
-          T0=$(date +%s)
-          dbt test --target dev --project-dir dbt --profiles-dir dbt --exclude tag:heavy
-          cp dbt/target/run_results.json /tmp/test_results.json
-          echo "T_DBT_TEST=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
-
-      - name: 📚 Phase 4 — dbt docs generate
-        # always(): docs still generate (and publish) when dbt run/test failed — a red run
-        # with fresh docs beats a red run with stale docs.
-        id: docs
-        if: always()
-        run: |
-          T0=$(date +%s)
-          dbt docs generate --target dev --project-dir dbt --profiles-dir dbt
-          echo "T_DBT_DOCS=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
-
-      - name: 🚀 Phase 5 — Deploy Fabric items
-        # deploy.py is hardcoded to one workspace, so only the main branch deploys the Fabric
-        # items (Variable Library, notebook, semantic model, pipeline) and reschedules. Other
-        # branches still run Phases 1-4 to validate the dbt build.
-        run: |
-          T0=$(date +%s)
-          if [ "${{ github.ref_name }}" = "main" ] && [ "${{ github.event_name }}" != "schedule" ]; then
-            python deploy.py
-            echo "DEPLOY_SKIPPED=false" >> "$GITHUB_ENV"
-          else
-            echo "::notice::Skipping Fabric item deploy — only push/dispatch to main deploys; scheduled and non-main runs are data-only."
-            echo "DEPLOY_SKIPPED=true" >> "$GITHUB_ENV"
-          fi
-          echo "T_DEPLOY=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
-
-      - name: 📤 Upload Pages artifact
-        if: ${{ always() && steps.docs.outcome == 'success' }}
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dbt/target
-
-      - name: 📝 Build dashboard summary
-        if: always()
-        env:
-          PAGE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
-          # job.status inside an always() step reflects whether any earlier step failed.
-          JOB_STATUS: ${{ job.status }}
-        run: python .github/scripts/summary.py >> "$GITHUB_STEP_SUMMARY"
-
-  publish:
-    name: 🌐 Publish docs to Pages
-    needs: pipeline
-    # Publish whenever docs were generated, even if the pipeline job went red overall.
-    if: ${{ always() && needs.pipeline.outputs.docs_ok == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment:
-      name: github-pages
-      url: ${{ steps.publish.outputs.page_url }}
-    steps:
-      - name: 🌐 Deploy to GitHub Pages
-        id: publish
-        uses: actions/deploy-pages@v4
-      - name: 📝 Summary
-        run: |
-          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
-          # 🌐 Docs Published
-
-          ![status](https://img.shields.io/badge/pages-live-brightgreen?style=for-the-badge&logo=githubpages)
-
-          🔗 **Live site:** ${{ steps.publish.outputs.page_url }}
-          EOF
