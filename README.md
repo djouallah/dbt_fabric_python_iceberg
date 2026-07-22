@@ -162,4 +162,4 @@ Full DML works as of **v1.5.3** (May 2026): `CREATE TABLE`, `CTAS`, `INSERT`, `U
 - **Use GUIDs in OneLake URLs, not friendly names.** With names, OneLake silently doesn't produce Delta metadata for the tables you write — probably a temporary bug; GUIDs work around it today.
 - **One Iceberg table per OneLake folder.** You can't get Delta if two Iceberg tables share a location — the spec allows it, but OneLake's virtualization identifies tables by directory.
 - **Emit `timestamptz`, not `timestamp`.** Naive `TIMESTAMP` maps to Delta `timestamp_ntz`, which Microsoft docs flag as "not fully supported across Fabric workloads." `CAST(... AS TIMESTAMPTZ)` at output columns.
-- **Delta metadata generation is asynchronous.** Freshly written data may take a moment to surface as a Delta table for Direct Lake reads.
+- **Power BI needs Delta metadata, not Iceberg.** Direct Lake can't read Iceberg metadata directly — OneLake auto-generates Delta metadata from the Iceberg tables (that virtualization is the whole reason this pipeline works). Generation is asynchronous, so freshly written data may take a moment to surface for Direct Lake reads.
