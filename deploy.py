@@ -6,7 +6,7 @@ LAKEHOUSE      = "data"
 FOLDER         = "aemo"          # workspace folder new items land in
 SCHEDULE_EVERY = "720m"          # pipeline cadence — runs alongside the 6-hourly CI cron by
                                  # design (demo of in-Fabric scheduling); overlap safety comes
-                                 # from keyed fact merges + the assert_*_grain test tripwires
+                                 # from insert-only keyed merges + the assert_*_grain tripwires
 DOWNLOAD_LIMIT = "5"             # limits injected into the Variable Library (in-Fabric notebook run)
 PROCESS_LIMIT  = "100"
 

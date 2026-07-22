@@ -1,18 +1,23 @@
 -- depends_on: {{ ref('fct_scada_today') }}
 -- depends_on: {{ ref('fct_price_today') }}
 
--- Why append + out-of-transaction TRUNCATE instead of merge/delete+insert on the
--- (date, time, DUID) grain: the OneLake Iceberg REST catalog allows only ONE
--- add-snapshot update per commit ("Only one instance of each update type is allowed
--- per request"), and a DuckDB MERGE/DELETE+INSERT that actually touches existing rows
--- emits two snapshots in one commit -> BadRequest 400. Until that changes, the
--- rebuild branch truncates in its own commit (transaction: false) and appends in the
--- next; assert_fct_summary_grain is the duplicate tripwire.
+-- Insert-only merge on the (date, time, DUID) grain — one operation, one commit.
+-- The OneLake Iceberg REST catalog allows only ONE add-snapshot update per commit
+-- ("Only one instance of each update type is allowed per request"), so a merge with
+-- a WHEN MATCHED UPDATE branch (delete files + data files in one commit) is rejected
+-- with BadRequest 400. WHEN MATCHED DO NOTHING keeps every run a single append
+-- snapshot: the daily branch backfills any keys missing across history, the intraday
+-- branch tops up after the cutoff, and re-runs dedupe on the key instead of
+-- double-appending. Consequence: once a key exists (e.g. from intraday), the daily
+-- value never overwrites it — same measurement, so acceptable; `dbt run
+-- --full-refresh` is the reconciliation lever. assert_fct_summary_grain is the
+-- duplicate tripwire.
 {{ config(
     materialized='incremental',
-    incremental_strategy='append',
-    schema='mart',
-    pre_hook=[{"sql": "{% if is_incremental() and execute and flags.WHICH == 'run' %}{%- set r = run_query('SELECT (SELECT COUNT(DISTINCT DATE) FROM ' ~ ref('fct_scada') ~ ' WHERE INTERVENTION = 0) AS s, (SELECT COUNT(DISTINCT date) FROM ' ~ this ~ ') AS m') -%}{%- if r and r.rows[0][0] > r.rows[0][1] -%}TRUNCATE TABLE {{ this }}{%- endif -%}{% endif %}", "transaction": false}]
+    incremental_strategy='merge',
+    unique_key=['date', 'time', 'DUID'],
+    merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
+    schema='mart'
 ) }}
 
 {% if is_incremental() %}
