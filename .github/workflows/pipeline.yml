@@ -32,6 +32,9 @@ env:
   AZURE_TRANSPORT_OPTION_TYPE: curl
   CURL_CA_INFO: /etc/ssl/certs/ca-certificates.crt
   ONELAKE_ENDPOINT: https://onelake.table.fabric.microsoft.com/iceberg
+  # Authenticated GitHub API calls for the staging model's backfill listing —
+  # anonymous calls share the runner IP's 60 req/h quota and get rate-limited.
+  GITHUB_TOKEN: ${{ github.token }}
   # OIDC federated identity — duckrun mints its own Fabric/OneLake tokens from these (no fab).
   AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
   AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}

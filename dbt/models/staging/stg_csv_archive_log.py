@@ -172,33 +172,48 @@ def model(dbt, session):
     """).fetchone()[0]
 
     if aemo_new < download_limit:
-        # Backfill from GitHub
-        session.sql("""
-            INSERT INTO daily_files_web
-            WITH
-              api_responses AS (
-                SELECT 2018 AS year, content AS json_content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2018')
-                UNION ALL SELECT 2019, content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2019')
-                UNION ALL SELECT 2020, content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2020')
-                UNION ALL SELECT 2021, content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2021')
-                UNION ALL SELECT 2022, content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2022')
-                UNION ALL SELECT 2023, content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2023')
-                UNION ALL SELECT 2024, content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2024')
-                UNION ALL SELECT 2025, content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2025')
-                UNION ALL SELECT 2026, content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2026')
-              ),
-              parsed_files AS (
-                SELECT year, unnest(from_json(json_content, '["json"]')) AS file_info
-                FROM api_responses
-              )
-            SELECT
-              json_extract_string(file_info, '$.download_url') AS full_url,
-              split_part(json_extract_string(file_info, '$.name'), '.', 1) AS filename
-            FROM parsed_files
-            WHERE json_extract_string(file_info, '$.name') LIKE 'PUBLIC_DAILY%.zip'
-              AND split_part(json_extract_string(file_info, '$.name'), '.', 1)
-                  NOT IN (SELECT filename FROM daily_files_web)
-        """)
+        # Authenticated GitHub API calls get 5000 req/h vs 60 anonymous — shared CI
+        # runner IPs exhaust the anonymous quota and the listing calls fail.
+        github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if github_token:
+            session.sql(f"""
+                CREATE OR REPLACE SECRET github_api (
+                    TYPE HTTP,
+                    BEARER_TOKEN '{github_token}',
+                    SCOPE 'https://api.github.com'
+                )
+            """)
+        # Backfill from GitHub — opportunistic: if the listing API is unavailable
+        # (rate limit, outage), continue with the AEMO current files only.
+        try:
+            session.sql("""
+                INSERT INTO daily_files_web
+                WITH
+                  api_responses AS (
+                    SELECT 2018 AS year, content AS json_content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2018')
+                    UNION ALL SELECT 2019, content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2019')
+                    UNION ALL SELECT 2020, content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2020')
+                    UNION ALL SELECT 2021, content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2021')
+                    UNION ALL SELECT 2022, content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2022')
+                    UNION ALL SELECT 2023, content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2023')
+                    UNION ALL SELECT 2024, content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2024')
+                    UNION ALL SELECT 2025, content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2025')
+                    UNION ALL SELECT 2026, content FROM read_text('https://api.github.com/repos/djouallah/fabric_demo/contents/data/archive/2026')
+                  ),
+                  parsed_files AS (
+                    SELECT year, unnest(from_json(json_content, '["json"]')) AS file_info
+                    FROM api_responses
+                  )
+                SELECT
+                  json_extract_string(file_info, '$.download_url') AS full_url,
+                  split_part(json_extract_string(file_info, '$.name'), '.', 1) AS filename
+                FROM parsed_files
+                WHERE json_extract_string(file_info, '$.name') LIKE 'PUBLIC_DAILY%.zip'
+                  AND split_part(json_extract_string(file_info, '$.name'), '.', 1)
+                      NOT IN (SELECT filename FROM daily_files_web)
+            """)
+        except Exception as e:
+            print(f"  WARN: GitHub backfill listing unavailable, continuing with AEMO files only: {e}")
 
     # Get new daily files to download
     daily_to_download = session.sql(f"""
