@@ -148,7 +148,7 @@ DuckDB's Iceberg **writer** is new and under heavy development — it gained ful
 Full DML works as of **v1.5.3** (May 2026): `CREATE TABLE`, `CTAS`, `INSERT`, `UPDATE`, `DELETE`, `MERGE INTO`, and `ALTER TABLE` (schema evolution — add/drop/rename/retype columns), plus `bucket`/`truncate` partition transforms and Iceberg V3. The remaining caveats:
 
 - **Merge-on-read only.** `UPDATE`/`DELETE`/`MERGE` write positional delete files; copy-on-write is not supported. A table whose `write.update.mode` or `write.delete.mode` is set to anything other than `merge-on-read` will fail the operation. Delete files accumulate, so periodic maintenance matters.
-- **No built-in table maintenance.** No compaction / `OPTIMIZE` / snapshot expiry from DuckDB — do it out-of-band (PyIceberg does snapshot expiration today).
+- **No built-in table maintenance yet.** No compaction / `OPTIMIZE` / snapshot expiry from DuckDB today — handle it out-of-band (PyIceberg does snapshot expiration). Initial support lands in DuckDB 2.0.
 - **Partitioned tables** don't honor `write.target-file-size-bytes` or `write.parquet.row-group-size-bytes`.
 - **`Geography` and `Unknown` types** aren't supported yet — planned for DuckDB 2.0.
 - **Track a recent DuckDB.** Iceberg writes to OneLake work out of the box from **1.4.5**; `MERGE INTO`/`ALTER TABLE` arrived in **1.5.3**. The extension is under heavy development, so run the latest release rather than pinning a version.
