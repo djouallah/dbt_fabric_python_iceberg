@@ -7,6 +7,22 @@
 
 {% set csv_archive_path = get_csv_archive_path() %}
 
+{%- set check_files_query -%}
+SELECT COUNT(*) as cnt FROM {{ ref('stg_csv_archive_log') }}
+WHERE source_type = 'price_today'
+{%- if is_incremental() %}
+AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }})
+{%- endif -%}
+{%- endset -%}
+
+{%- if execute and flags.WHICH == 'run' -%}
+  {%- set files_result = run_query(check_files_query) -%}
+  {%- set has_files = files_result and files_result.rows[0][0] > 0 -%}
+{%- else -%}
+  {%- set has_files = true -%}
+{%- endif -%}
+
+{% if has_files %}
 WITH price_staging AS (
   SELECT *
   FROM read_csv(
@@ -162,3 +178,7 @@ SELECT
   {{ parse_filename('filename') }} AS file,
   CAST(YEAR(SETTLEMENTDATE) AS INT) AS YEAR
 FROM price_staging
+{% else %}
+-- No unprocessed files: empty result keeps existing data untouched
+SELECT * FROM {{ this }} WHERE FALSE
+{% endif %}
