@@ -11,6 +11,9 @@ on:
   schedule:
     # Every 6 hours (00:00/06:00/12:00/18:00 UTC) — refresh the AEMO data.
     # Scheduled runs are data-only (Phase 5 deploy is skipped; see below).
+    # Intentionally coexists with the in-Fabric pipeline deploy.py schedules every 12h: both
+    # writers are safe to overlap because the incremental models use keyed strategies
+    # (merge/delete+insert on unique_key), not blind appends.
     - cron: "0 */6 * * *"
   workflow_dispatch:
 
@@ -49,6 +52,8 @@ jobs:
     name: 🎯 Pipeline
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    outputs:
+      docs_ok: ${{ steps.docs.outcome == 'success' }}
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
@@ -60,8 +65,9 @@ jobs:
 
       - name: 📦 Install dependencies
         # duckrun brings dbt-duckdb, duckdb>=1.5.4, deltalake, azure-identity and obstore. The
-        # Iceberg/azure/avro DuckDB extensions load from the stable core repo via profiles.yml
-        # `extensions:` — no nightly force-install needed now the OneLake-Iceberg bug is fixed.
+        # Iceberg/azure/avro DuckDB extensions auto-install + auto-load from the stable core repo
+        # on first use (no `extensions:` list anywhere) — no nightly force-install needed now the
+        # OneLake-Iceberg bug is fixed.
         run: pip install duckrun
 
       - name: 🔐 Azure federated login
@@ -119,11 +125,14 @@ jobs:
             if [ $rc -ne 0 ]; then
               echo "::warning::retry 1 still failing — sleeping 90s and retrying (2/2)..."
               sleep 90
-              dbt retry --target dev --project-dir dbt --profiles-dir dbt || true
+              rc=0; dbt retry --target dev --project-dir dbt --profiles-dir dbt || rc=$?
               snap 2
             fi
           fi
+          # Timing is written before the exit so the always() summary still renders it.
           echo "T_DBT_RUN=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
+          # Fail the job if all three attempts failed — a red run must not look green.
+          exit $rc
 
       - name: ✅ Phase 3 — dbt test
         run: |
@@ -133,6 +142,10 @@ jobs:
           echo "T_DBT_TEST=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
 
       - name: 📚 Phase 4 — dbt docs generate
+        # always(): docs still generate (and publish) when dbt run/test failed — a red run
+        # with fresh docs beats a red run with stale docs.
+        id: docs
+        if: always()
         run: |
           T0=$(date +%s)
           dbt docs generate --target dev --project-dir dbt --profiles-dir dbt
@@ -154,6 +167,7 @@ jobs:
           echo "T_DEPLOY=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
 
       - name: 📤 Upload Pages artifact
+        if: ${{ always() && steps.docs.outcome == 'success' }}
         uses: actions/upload-pages-artifact@v3
         with:
           path: dbt/target
@@ -162,6 +176,8 @@ jobs:
         if: always()
         env:
           PAGE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+          # job.status inside an always() step reflects whether any earlier step failed.
+          JOB_STATUS: ${{ job.status }}
         run: |
           python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json, os
@@ -243,7 +259,9 @@ jobs:
           # ===== Header =====
           print("# 🎯 Pipeline Summary")
           print()
-          print(f"![pipeline](https://img.shields.io/badge/pipeline-success-brightgreen?style=for-the-badge&logo=githubactions)", end=' ')
+          status = env('JOB_STATUS', 'unknown').lower()
+          color = {'success': 'brightgreen', 'failure': 'red'}.get(status, 'lightgrey')
+          print(f"![pipeline](https://img.shields.io/badge/pipeline-{status}-{color}?style=for-the-badge&logo=githubactions)", end=' ')
           print(f"![workspace](https://img.shields.io/badge/workspace-{ws}-0078d4?style=for-the-badge&logo=microsoft)", end=' ')
           print(f"![branch](https://img.shields.io/badge/branch-{branch}-7719aa?style=for-the-badge)", end=' ')
           print(f"![sha](https://img.shields.io/badge/sha-{sha}-grey?style=for-the-badge&logo=github)", end=' ')
@@ -340,6 +358,8 @@ jobs:
   publish:
     name: 🌐 Publish docs to Pages
     needs: pipeline
+    # Publish whenever docs were generated, even if the pipeline job went red overall.
+    if: ${{ always() && needs.pipeline.outputs.docs_ok == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
