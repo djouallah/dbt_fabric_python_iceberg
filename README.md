@@ -19,7 +19,7 @@
 [![dbt docs](https://img.shields.io/badge/dbt%20docs-live-blue)](https://djouallah.github.io/dbt_fabric_python_iceberg/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Iceberg is cool. The whole pipeline runs anywhere Python runs — your laptop, a GitHub Actions runner, a container, an AI agent. The Delta Lake version of this pipeline lives at <https://github.com/djouallah/analytics-as-code>; this repo is the Iceberg variant — it writes to the OneLake Iceberg REST catalog, which is what enables Power BI Direct Lake via OneLake's Iceberg→Delta virtualization.
+Iceberg is cool. The whole pipeline runs anywhere Python runs — your laptop, a GitHub Actions runner, a container, an AI agent. The Delta Lake version of this pipeline lives at <https://github.com/djouallah/dbt_fabric_python_delta>; a fully GitHub-deployed pipeline (no Fabric required) lives at <https://github.com/djouallah/analytics-as-code>. This repo is the Iceberg variant — it writes to the OneLake Iceberg REST catalog, which is what enables Power BI Direct Lake via OneLake's Iceberg→Delta virtualization.
 
 **Contents:** [The data](#the-data) · [OneLake connection](#onelake-connection) · [Prerequisites](#prerequisites) · [dbt Iceberg configuration](#dbt-iceberg-configuration) · [Schema layout](#schema-layout) · [Manual deploy](#manual-deploy-from-laptop) · [Automated deployment](#optional-automated-deployment-to-fabric) · [Limitations](#limitations) · [License](#license)
 
