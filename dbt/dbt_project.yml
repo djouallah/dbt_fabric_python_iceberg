@@ -4,10 +4,8 @@ version: '1.0.0'
 profile: 'aemo_electricity'
 
 model-paths: ["models"]
-analysis-paths: ["analyses"]
 test-paths: ["tests"]
 macro-paths: ["macros"]
-snapshot-paths: ["snapshots"]
 
 clean-targets:
   - "target"
@@ -16,13 +14,11 @@ clean-targets:
 on-run-start:
   - "SET GLOBAL azure_transport_option_type = '{{ env_var('AZURE_TRANSPORT_OPTION_TYPE', 'default') }}'"
 
-vars:
-  # Env vars used:
-  # - DBT_SCHEMA: schema name (default: mart)
-  # - csv_archive_path, path_root: for abfss:// paths in Fabric
-  # - download_limit: number of files to download per source (default: 2)
-  
-
+# Environment contract (set by the CI workflow / Fabric notebook / laptop shell):
+#   ONELAKE_TOKEN, ONELAKE_ENDPOINT, WAREHOUSE_PATH  -> profiles.yml (Iceberg attach)
+#   FILES_PATH                                       -> get_root_path/get_csv_archive_path macros
+#   download_limit, process_limit                    -> staging download + fact ingestion batch size
+#   AZURE_TRANSPORT_OPTION_TYPE                      -> curl on GitHub runners, default elsewhere
 
 models:
   aemo_electricity:
@@ -31,7 +27,8 @@ models:
       +schema: landing
     dimensions:
       +materialized: table
+      +schema: mart
     marts:
       +materialized: incremental
-      +schema: landing
+      +schema: landing   # raw facts; fct_summary overrides to mart (Power BI-facing)
 

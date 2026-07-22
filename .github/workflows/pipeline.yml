@@ -62,13 +62,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
       - name: 📦 Install dependencies
         # duckrun brings dbt-duckdb, duckdb>=1.5.4, deltalake, azure-identity and obstore. The
         # Iceberg/azure/avro DuckDB extensions auto-install + auto-load from the stable core repo
         # on first use (no `extensions:` list anywhere) — no nightly force-install needed now the
         # OneLake-Iceberg bug is fixed.
-        run: pip install duckrun
+        run: pip install -r requirements.txt
 
       - name: 🔐 Azure federated login
         uses: azure/login@v2

@@ -1,0 +1,3 @@
+# duckrun deliberately pins its own dbt-duckdb / duckdb / deltalake versions —
+# do not add separate pins here, they would fight duckrun's.
+duckrun
