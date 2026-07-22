@@ -21,7 +21,7 @@
 
 Iceberg is cool. The whole pipeline runs anywhere Python runs — your laptop, a GitHub Actions runner, a container, an AI agent. The Delta Lake version of this pipeline lives at <https://github.com/djouallah/dbt_fabric_python_delta>; a fully GitHub-deployed pipeline (no Fabric required) lives at <https://github.com/djouallah/analytics-as-code>. This repo is the Iceberg variant — it writes to the OneLake Iceberg REST catalog, which is what enables Power BI Direct Lake via OneLake's Iceberg→Delta virtualization.
 
-**Contents:** [The data](#the-data) · [OneLake connection](#onelake-connection) · [Prerequisites](#prerequisites) · [dbt Iceberg configuration](#dbt-iceberg-configuration) · [Schema layout](#schema-layout) · [Manual deploy](#manual-deploy-from-laptop) · [Automated deployment](#optional-automated-deployment-to-fabric) · [Limitations](#limitations) · [License](#license)
+**Contents:** [The data](#the-data) · [OneLake connection](#onelake-connection) · [Prerequisites](#prerequisites) · [dbt Iceberg configuration](#dbt-iceberg-configuration) · [Schema layout](#schema-layout) · [Manual deploy](#manual-deploy-from-laptop) · [Automated deployment](#optional-automated-deployment-to-fabric) · [Limitations](#limitations) · [Why Iceberg is cool though](#why-iceberg-is-cool-though) · [License](#license)
 
 ## The data
 
@@ -183,6 +183,15 @@ Full DML works as of **v1.5.3**: `CREATE TABLE`, `CTAS`, `INSERT`, `UPDATE`, `DE
 - **Power BI needs Delta metadata, not Iceberg.** Direct Lake can't read Iceberg metadata directly — OneLake auto-generates Delta metadata from the Iceberg tables (that virtualization is the whole reason this pipeline works). Generation is asynchronous, so freshly written data may take a moment to surface for Direct Lake reads.
 
 ---
+
+## Why Iceberg is cool though
+
+Every limitation above is a snapshot of a moving target. [`duckdb-iceberg`](https://github.com/duckdb/duckdb-iceberg) had **44 distinct contributors** land **3,294 commits in the last 12 months** (as of July 2026) — that's not a side project, that's a writer being built in the open at full speed. The gaps have names and PR numbers, and they close monthly.
+
+[![commit activity](https://img.shields.io/github/commit-activity/y/duckdb/duckdb-iceberg?label=duckdb-iceberg%20commits%2Fyear)](https://github.com/duckdb/duckdb-iceberg/graphs/contributors)
+[![contributors](https://img.shields.io/github/contributors/duckdb/duckdb-iceberg?label=contributors%20all%20time)](https://github.com/duckdb/duckdb-iceberg/graphs/contributors)
+
+And the payoff is the architecture: one engine that plans, executes, **and commits** — no handoff to a second writer with its own type system and its own bugs. When something fails, it fails with a protocol-level error against a real catalog API, and the fix lands upstream in one project.
 
 ## License
 
