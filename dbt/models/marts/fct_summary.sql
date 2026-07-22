@@ -6,12 +6,12 @@
 -- ("Only one instance of each update type is allowed per request"), so a merge with
 -- a WHEN MATCHED UPDATE branch (delete files + data files in one commit) is rejected
 -- with BadRequest 400. WHEN MATCHED DO NOTHING keeps every run a single append
--- snapshot: the daily branch backfills any keys missing across history, the intraday
+-- snapshot: the daily branch backfills dates missing from the summary, the intraday
 -- branch tops up after the cutoff, and re-runs dedupe on the key instead of
--- double-appending. Consequence: once a key exists (e.g. from intraday), the daily
--- value never overwrites it — same measurement, so acceptable; `dbt run
--- --full-refresh` is the reconciliation lever. assert_fct_summary_grain is the
--- duplicate tripwire.
+-- double-appending. Consequences: once a key exists (e.g. from intraday), the daily
+-- value never overwrites it — same measurement, so acceptable — and within-date key
+-- gaps aren't revisited; `dbt run --full-refresh` is the reconciliation lever.
+-- assert_fct_summary_grain is the duplicate tripwire.
 {{ config(
     materialized='incremental',
     incremental_strategy='merge',
@@ -37,7 +37,10 @@ SELECT
 
 {% if has_new_daily %}
 
--- New daily data found: full rebuild from daily
+-- New daily data found: backfill ONLY the dates missing from the summary. Computing
+-- full history here OOMs the 7GB CI runner — the merge materializes its source as a
+-- temp relation before joining the target, so the source must stay small. Within-date
+-- gaps (a key missing for a date the summary already has) need `--full-refresh`.
 WITH daily_summary AS (
   SELECT
     s.DATE as date,
@@ -54,6 +57,9 @@ WITH daily_summary AS (
     s.INTERVENTION = 0
     AND s.INITIALMW <> 0
     AND p.INTERVENTION = 0
+    {% if is_incremental() %}
+    AND s.DATE NOT IN (SELECT DISTINCT date FROM {{ this }})
+    {% endif %}
   GROUP BY ALL
 )
 
