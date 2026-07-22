@@ -5,7 +5,7 @@ aemo_electricity:
       type: duckdb
       path: ':memory:'
       database: onelake
-      threads: 1
+      threads: 2
       schema: "{{ env_var('DBT_SCHEMA', 'mart') }}"
       # azure / iceberg / avro auto-install + auto-load on first use (the AZURE secret and the
       # iceberg ATTACH below trigger it) — no explicit `extensions:` needed on duckdb >= 1.5.4.
