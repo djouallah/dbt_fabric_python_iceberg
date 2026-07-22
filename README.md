@@ -165,5 +165,3 @@ Full DML works as of **v1.5.3** (May 2026): `CREATE TABLE`, `CTAS`, `INSERT`, `U
 - **One Iceberg table per OneLake folder.** You can't get Delta if two Iceberg tables share a location — the spec allows it, but OneLake's virtualization identifies tables by directory.
 - **Emit `timestamptz`, not `timestamp`.** Naive `TIMESTAMP` maps to Delta `timestamp_ntz`, which Microsoft docs flag as "not fully supported across Fabric workloads." `CAST(... AS TIMESTAMPTZ)` at output columns.
 - **Delta metadata generation is asynchronous.** Freshly written data may take a moment to surface as a Delta table for Direct Lake reads.
-
-> **Operational note:** the `:memory:` DuckDB needs `memory_limit` + `temp_directory` set (see `profiles.yml`) so large aggregations spill to disk instead of getting OOM-killed.
