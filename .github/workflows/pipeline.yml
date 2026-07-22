@@ -45,13 +45,14 @@ env:
   WS_ID: ea575278-bd81-459c-9680-47829898c902
   LH_NAME: data
   FOLDER: aemo
-  # Files fetched (download) and turned into fact rows (process) per feed per run. An hourly
-  # window is only ~12 intraday files/feed, so 80 leaves plenty of headroom for catch-up and
-  # the historical backfill. Other contexts size this pair differently on purpose — see the
-  # comment block in deploy.py for the full map (deploy 5/100, variables.json placeholders,
-  # notebook local-dev 2/1000).
-  CI_DOWNLOAD_LIMIT: "80"
-  CI_PROCESS_LIMIT: "80"
+  # Files fetched (download) and turned into fact rows (process) per feed per run. This is a
+  # CAP, not a workload: steady state on the hourly cron only sees ~12 intraday files/feed and
+  # <=1 daily file, so 300 only matters during backfill (~3,000 daily files ≈ 10 runs). It also
+  # bounds fct_summary's missing-dates merge source (~300 days/run — well inside runner memory).
+  # Other contexts size this pair differently on purpose — see the comment block in deploy.py
+  # for the full map (deploy 5/100, variables.json placeholders, notebook local-dev 2/1000).
+  CI_DOWNLOAD_LIMIT: "300"
+  CI_PROCESS_LIMIT: "300"
 
 jobs:
   pipeline:
