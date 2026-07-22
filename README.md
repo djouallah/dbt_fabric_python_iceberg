@@ -28,12 +28,9 @@ You can run the notebook anywhere — I've used it on my laptop, GitHub, Colab (
 
 ## dbt Iceberg configuration
 
-In `profiles.yml`, the target attaches OneLake as an Iceberg catalog. Extensions (`azure`, `iceberg`, `avro`) load from the **stable** core repo — no `core_nightly`:
+In `profiles.yml`, the target attaches OneLake as an Iceberg catalog. The `azure`, `iceberg`, and `avro` extensions auto-install + auto-load from the **stable** core repo on first use (the AZURE secret and the iceberg `attach` trigger it) — no `extensions:` list, no `core_nightly`:
 
 ```yaml
-extensions:
-  - azure
-  - iceberg
 settings:
   preserve_insertion_order: false
 secrets:

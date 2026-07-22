@@ -54,8 +54,9 @@ options:
 
 - Plain CTAS works with these options (the earlier "CTAS unsupported" limitation is resolved).
 - Use int `0`/`1`, not bool `false`/`true`: dbt-duckdb silently drops boolean-false attach options.
-- DuckDB extensions (`azure`, `iceberg`, `avro`) load from the **stable** core repo via profiles
-  `extensions:` — no `FORCE INSTALL ... FROM core_nightly` anywhere. Requires `duckdb>=1.5.4`.
+- DuckDB extensions (`azure`, `iceberg`, `avro`) auto-install + auto-load from the **stable** core
+  repo on first use (the AZURE secret + iceberg ATTACH trigger it) — no `extensions:` list, no
+  `FORCE INSTALL ... FROM core_nightly` anywhere. Requires `duckdb>=1.5.4`.
 
 ## Notebook (`fabric_items/run.Notebook`)
 
