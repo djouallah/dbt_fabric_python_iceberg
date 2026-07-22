@@ -11,9 +11,10 @@ aemo_electricity:
       # iceberg ATTACH below trigger it) — no explicit `extensions:` needed on duckdb >= 1.5.4.
       settings:
         preserve_insertion_order: false
-        memory_limit: '5GB'                 # stay under the ~7GB CI runner so DuckDB spills instead of OOM-killing
-        temp_directory: '/tmp/duckdb_spill' # enable disk spilling for the :memory: database
-        max_temp_directory_size: '30GB'
+        # A spill directory so large aggregations spill to disk instead of OOM-killing. No
+        # memory_limit — DuckDB defaults to 80% of host RAM, right for both the small CI runner and a
+        # large Fabric session; hardcoding a cap here would wrongly throttle Fabric too.
+        temp_directory: '/tmp/duckdb_spill'
       secrets:
         - type: azure
           name: onelake_storage
