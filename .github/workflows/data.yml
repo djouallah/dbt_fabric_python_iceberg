@@ -20,6 +20,14 @@ on:
         description: "Files turned into fact rows per feed per run"
         default: "300"
         required: false
+      workspace_id:
+        description: "Fabric workspace ID"
+        default: "ea575278-bd81-459c-9680-47829898c902"
+        required: false
+      lakehouse_name:
+        description: "Lakehouse name"
+        default: "data"
+        required: false
 
 concurrency:
   group: data-${{ github.ref_name }}
@@ -41,9 +49,10 @@ env:
   # OIDC federated identity — duckrun mints its own Fabric/OneLake tokens from these.
   AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
   AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-  # Keep in sync with pipeline.yml / deploy.py.
-  WS_ID: ea575278-bd81-459c-9680-47829898c902
-  LH_NAME: data
+  # Keep in sync with pipeline.yml / deploy.py. Manual dispatch can override;
+  # scheduled runs have no inputs and fall back to the same defaults.
+  WS_ID: ${{ inputs.workspace_id || 'ea575278-bd81-459c-9680-47829898c902' }}
+  LH_NAME: ${{ inputs.lakehouse_name || 'data' }}
   FOLDER: aemo
   # Same caps as pipeline.yml — see the comment there. Manual dispatch can override;
   # scheduled runs have no inputs and fall back to the same 300 defaults.
