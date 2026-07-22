@@ -191,8 +191,6 @@ Every limitation above is a snapshot of a moving target. [`duckdb-iceberg`](http
 [![commit activity](https://img.shields.io/github/commit-activity/y/duckdb/duckdb-iceberg?label=duckdb-iceberg%20commits%2Fyear)](https://github.com/duckdb/duckdb-iceberg/graphs/contributors)
 [![contributors](https://img.shields.io/github/contributors/duckdb/duckdb-iceberg?label=contributors%20all%20time)](https://github.com/duckdb/duckdb-iceberg/graphs/contributors)
 
-And the payoff is the architecture: one engine that plans, executes, **and commits** — no handoff to a second writer with its own type system and its own bugs. When something fails, it fails with a protocol-level error against a real catalog API, and the fix lands upstream in one project.
-
 ## License
 
 MIT — see [LICENSE](LICENSE).
