@@ -151,7 +151,7 @@ Full DML works as of **v1.5.3** (May 2026): `CREATE TABLE`, `CTAS`, `INSERT`, `U
 - **No built-in table maintenance.** No compaction / `OPTIMIZE` / snapshot expiry from DuckDB — do it out-of-band (PyIceberg does snapshot expiration today).
 - **Partitioned tables** don't honor `write.target-file-size-bytes` or `write.parquet.row-group-size-bytes`.
 - **`Geography` and `Unknown` types** aren't supported yet — planned for DuckDB 2.0.
-- **Needs DuckDB ≥ 1.5.4** for OneLake: the write bug is fixed there, and 1.5.3 is where `MERGE`/`ALTER TABLE` landed. (The pin used to be 1.4.4 with `core_nightly` extensions — no longer needed.)
+- **Track a recent DuckDB.** Iceberg writes to OneLake work out of the box from **1.4.5**; `MERGE INTO`/`ALTER TABLE` arrived in **1.5.3**. The extension is under heavy development, so run the latest release rather than pinning a version.
 
 ### OneLake / Fabric round-trip
 
