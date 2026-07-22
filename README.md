@@ -8,14 +8,26 @@
 > OneLake Iceberg write is mainly for third-party interoperability — think Snowflake, etc.
 >
 > That said, DuckDB's Iceberg support is maturing fast: **1.4.5** was the first release that
-> basically works, **1.5** added `MERGE` (and `ALTER TABLE`), and **2.0** is set to add table
-> maintenance, retries, and more. Run the latest.
+> basically works, **1.5.3** added `MERGE INTO` (and `ALTER TABLE`), and **2.0** is set to add
+> table maintenance, retries, and more. Run the latest.
 
 ---
 
 # dbt + DuckDB + OneLake Iceberg REST Catalog
 
-Iceberg is cool. The whole pipeline runs anywhere Python runs — your laptop, a GitHub Actions runner, a container, an AI agent. I have a full working pipeline already here, fully deployed on GitHub: <https://github.com/djouallah/analytics-as-code>. This repo uses OneLake Catalog for data storage, specifically to enable Power BI semantic model deployment.
+[![Pipeline](https://github.com/djouallah/dbt_fabric_python_iceberg/actions/workflows/pipeline.yml/badge.svg)](https://github.com/djouallah/dbt_fabric_python_iceberg/actions/workflows/pipeline.yml)
+[![dbt docs](https://img.shields.io/badge/dbt%20docs-live-blue)](https://djouallah.github.io/dbt_fabric_python_iceberg/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+Iceberg is cool. The whole pipeline runs anywhere Python runs — your laptop, a GitHub Actions runner, a container, an AI agent. The Delta Lake version of this pipeline lives at <https://github.com/djouallah/analytics-as-code>; this repo is the Iceberg variant — it writes to the OneLake Iceberg REST catalog, which is what enables Power BI Direct Lake via OneLake's Iceberg→Delta virtualization.
+
+**Contents:** [The data](#the-data) · [OneLake connection](#onelake-connection) · [Prerequisites](#prerequisites) · [dbt Iceberg configuration](#dbt-iceberg-configuration) · [Schema layout](#schema-layout) · [Manual deploy](#manual-deploy-from-laptop) · [Automated deployment](#optional-automated-deployment-to-fabric) · [Limitations](#limitations) · [License](#license)
+
+## The data
+
+AEMO (the Australian Energy Market Operator) publishes the National Electricity Market's dispatch data as free CSVs on [nemweb.com.au](https://www.nemweb.com.au/) — 5-minute SCADA generation per unit (DUID) and regional spot prices. This pipeline downloads those files, lands them as Iceberg tables in OneLake, and serves a summary to a Power BI Direct Lake semantic model.
+
+## OneLake connection
 
 ![OneLake explorer showing the data lakehouse with mart schema tables and dbt project files](onelake.png)
 
@@ -29,6 +41,12 @@ Use the IDs, not the names. With friendly names in the URLs, OneLake's auto-gene
 
 You can run the notebook anywhere — I've used it on my laptop, GitHub, Colab (why not) — but running inside Fabric just gives you in-region latency, no egress, a scheduler, and automatic token handling.
 
+## Prerequisites
+
+- A Fabric workspace with access to the **OneLake Iceberg write private preview** (the hard gate — everything else is commodity)
+- Python 3.11+
+- Laptop path: the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) (`az login` with your own identity)
+- CI path: an Azure AD app registration with an OIDC federated credential + two GitHub secrets (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID` — see [CI/CD setup](#cicd-setup-github-actions))
 
 ## dbt Iceberg configuration
 
@@ -149,13 +167,13 @@ DuckDB's Iceberg **writer** is new and under heavy development — it gained ful
 
 ### DuckDB Iceberg writer
 
-Full DML works as of **v1.5.3** (May 2026): `CREATE TABLE`, `CTAS`, `INSERT`, `UPDATE`, `DELETE`, `MERGE INTO`, and `ALTER TABLE` (schema evolution — add/drop/rename/retype columns), plus `bucket`/`truncate` partition transforms and Iceberg V3. The remaining caveats:
+Full DML works as of **v1.5.3**: `CREATE TABLE`, `CTAS`, `INSERT`, `UPDATE`, `DELETE`, `MERGE INTO`, and `ALTER TABLE` (schema evolution — add/drop/rename/retype columns), plus `bucket`/`truncate` partition transforms and Iceberg V3. The remaining caveats:
 
 - **Merge-on-read only.** `UPDATE`/`DELETE`/`MERGE` write positional delete files; copy-on-write is not supported. A table whose `write.update.mode` or `write.delete.mode` is set to anything other than `merge-on-read` will fail the operation. Delete files accumulate, so periodic maintenance matters.
 - **No built-in table maintenance yet.** No compaction / `OPTIMIZE` / snapshot expiry from DuckDB today — handle it out-of-band (PyIceberg does snapshot expiration). Initial support lands in DuckDB 2.0.
 - **Partitioned tables** don't honor `write.target-file-size-bytes` or `write.parquet.row-group-size-bytes`.
 - **`Geography` and `Unknown` types** aren't supported yet — planned for DuckDB 2.0.
-- **Track a recent DuckDB.** Iceberg writes to OneLake work out of the box from **1.4.5**; `MERGE INTO`/`ALTER TABLE` arrived in **1.5.3**. The extension is under heavy development, so run the latest release rather than pinning a version.
+- **Track a recent DuckDB.** Iceberg writes to OneLake work out of the box from **1.4.5**; `MERGE INTO`/`ALTER TABLE` arrived in **1.5.3** (this repo requires `duckdb>=1.5.4`). The extension is under heavy development, so run the latest release rather than pinning a version.
 
 ### OneLake / Fabric round-trip
 
@@ -163,3 +181,9 @@ Full DML works as of **v1.5.3** (May 2026): `CREATE TABLE`, `CTAS`, `INSERT`, `U
 - **One Iceberg table per OneLake folder.** You can't get Delta if two Iceberg tables share a location — the spec allows it, but OneLake's virtualization identifies tables by directory.
 - **Emit `timestamptz`, not `timestamp`.** Naive `TIMESTAMP` maps to Delta `timestamp_ntz`, which Microsoft docs flag as "not fully supported across Fabric workloads." `CAST(... AS TIMESTAMPTZ)` at output columns.
 - **Power BI needs Delta metadata, not Iceberg.** Direct Lake can't read Iceberg metadata directly — OneLake auto-generates Delta metadata from the Iceberg tables (that virtualization is the whole reason this pipeline works). Generation is asynchronous, so freshly written data may take a moment to surface for Direct Lake reads.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
