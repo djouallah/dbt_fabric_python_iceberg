@@ -4,8 +4,12 @@
 > **This is not for production systems. Experimental and educational purposes only.**
 >
 > _Also requires OneLake Iceberg write (private preview, limited access)._
-> 
+>
 > OneLake Iceberg write is mainly for third-party interoperability — think Snowflake, etc.
+>
+> That said, DuckDB's Iceberg support is maturing fast: **1.4.5** was the first release that
+> basically works, **1.5** added `MERGE` (and `ALTER TABLE`), and **2.0** is set to add table
+> maintenance, retries, and more. Run the latest.
 
 ---
 
