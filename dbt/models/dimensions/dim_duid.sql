@@ -17,10 +17,18 @@
   {%- set has_new_duids = true -%}
 {%- endif -%}
 
+-- Insert-only merge on DUID (WHEN MATCHED DO NOTHING), same pattern as the facts:
+-- new DUIDs are inserted, existing ones are never touched — so a run that sees a
+-- stale/empty view of the table can at worst re-insert nothing that survives the
+-- merge, instead of the old wipe-and-reload appending a full duplicate copy.
+-- Consequence: attribute changes (region/fuel/geo) never update in place;
+-- `dbt run --full-refresh -s dim_duid` is the reconciliation lever.
 {{ config(
     materialized='incremental',
-    on_schema_change='sync_all_columns',
-    pre_hook=["DELETE FROM " ~ this ~ " WHERE 1=1"] if (has_new_duids and is_incremental()) else []
+    incremental_strategy='merge',
+    unique_key=['DUID'],
+    merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
+    on_schema_change='sync_all_columns'
 ) }}
 
 -- Ensure the download runs first
