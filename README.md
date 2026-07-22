@@ -157,8 +157,6 @@ Full DML works as of **v1.5.3** (May 2026): `CREATE TABLE`, `CTAS`, `INSERT`, `U
 - **`Geography` and `Unknown` types** aren't supported yet — planned for DuckDB 2.0.
 - **Needs DuckDB ≥ 1.5.4** for OneLake: the write bug is fixed there, and 1.5.3 is where `MERGE`/`ALTER TABLE` landed. (The pin used to be 1.4.4 with `core_nightly` extensions — no longer needed.)
 
-> This repo still uses `incremental_strategy='append'` with dedup-in-SQL by **choice** — it skips the target-table scan a `merge` does — not because `merge` is unavailable.
-
 ### OneLake / Fabric round-trip
 
 - **Use GUIDs in OneLake URLs, not friendly names.** With names, OneLake silently doesn't produce Delta metadata for the tables you write — probably a temporary bug; GUIDs work around it today.
