@@ -11,10 +11,11 @@ aemo_electricity:
       # iceberg ATTACH below trigger it) — no explicit `extensions:` needed on duckdb >= 1.5.4.
       settings:
         preserve_insertion_order: false
-        # A spill directory so large aggregations spill to disk instead of OOM-killing. No
-        # memory_limit — DuckDB defaults to 80% of host RAM, right for both the small CI runner and a
-        # large Fabric session; hardcoding a cap here would wrongly throttle Fabric too.
-        temp_directory: '/tmp/duckdb_spill'
+        # No memory_limit — DuckDB defaults to 80% of host RAM, right for both the small CI runner
+        # and a large Fabric session; hardcoding a cap here would wrongly throttle Fabric too.
+        # temp_directory (the spill dir) must NOT live here: dbt-duckdb re-applies settings on
+        # every cursor, and DuckDB rejects SET temp_directory once the dir has been used (i.e.
+        # after the first spill). It is set once via on-run-start in dbt_project.yml instead.
       secrets:
         - type: azure
           name: onelake_storage

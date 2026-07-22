@@ -13,6 +13,10 @@ clean-targets:
 
 on-run-start:
   - "SET GLOBAL azure_transport_option_type = '{{ env_var('AZURE_TRANSPORT_OPTION_TYPE', 'default') }}'"
+  # Spill dir for large aggregations. Set here (runs once, before anything spills) instead of in
+  # profiles.yml settings: dbt-duckdb re-applies settings on every cursor, and DuckDB throws
+  # "Cannot switch temporary directory after the current one has been used" after the first spill.
+  - "SET GLOBAL temp_directory = '/tmp/duckdb_spill'"
 
 # Environment contract (set by the CI workflow / Fabric notebook / laptop shell):
 #   ONELAKE_TOKEN, ONELAKE_ENDPOINT, WAREHOUSE_PATH  -> profiles.yml (Iceberg attach)

@@ -123,17 +123,28 @@ jobs:
           # snapshot after each attempt and let the summary merge them (later
           # attempts override earlier per unique_id) for the true final status.
           snap() { cp dbt/target/run_results.json "/tmp/rr_$1.json" 2>/dev/null || true; }
+          # dbt retry needs run_results.json; a fatal crash (not a model failure) exits before
+          # writing it, so fall back to a full dbt run rather than burning the retry on
+          # "Could not find previous run in 'target'".
+          attempt() {
+            if [ -f dbt/target/run_results.json ]; then
+              dbt retry --target dev --project-dir dbt --profiles-dir dbt
+            else
+              echo "::warning::no run_results.json from previous attempt — falling back to full dbt run"
+              dbt run --target dev --project-dir dbt --profiles-dir dbt
+            fi
+          }
           rc=0; dbt run --target dev --project-dir dbt --profiles-dir dbt || rc=$?
           snap 0
           if [ $rc -ne 0 ]; then
             echo "::warning::dbt run had failures — sleeping 60s and retrying (1/2)..."
             sleep 60
-            rc=0; dbt retry --target dev --project-dir dbt --profiles-dir dbt || rc=$?
+            rc=0; attempt || rc=$?
             snap 1
             if [ $rc -ne 0 ]; then
               echo "::warning::retry 1 still failing — sleeping 90s and retrying (2/2)..."
               sleep 90
-              rc=0; dbt retry --target dev --project-dir dbt --profiles-dir dbt || rc=$?
+              rc=0; attempt || rc=$?
               snap 2
             fi
           fi
