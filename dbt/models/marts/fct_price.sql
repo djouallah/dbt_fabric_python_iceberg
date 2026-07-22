@@ -1,9 +1,11 @@
--- merge is effectively insert-only here (the pre_hook prefilters unseen files); a
--- matched UPDATE would be rejected by the OneLake catalog's one-snapshot-per-commit
--- rule -- see the fct_summary.sql header for the full story.
+-- Insert-only merge (WHEN MATCHED THEN DO NOTHING): every commit stays a single
+-- append snapshot -- the OneLake catalog rejects multi-snapshot commits (see the
+-- fct_summary.sql header) -- while re-processed files dedupe on the unique_key
+-- instead of double-inserting.
 {{ config(
     materialized='incremental',
     incremental_strategy='merge',
+    merge_clauses={'when_matched': [{'action': 'do_nothing'}]},
     unique_key=['file', 'REGIONID', 'SETTLEMENTDATE','INTERVENTION'],
     pre_hook="SET VARIABLE price_daily_paths = (SELECT COALESCE(NULLIF(list('{{ get_csv_archive_path() }}' || archive_path), []), ['']) FROM (SELECT archive_path FROM {{ ref('stg_csv_archive_log') }} WHERE source_type = 'daily'{% if is_incremental() %} AND csv_filename NOT IN (SELECT DISTINCT file FROM {{ this }}){% endif %} LIMIT {{ env_var('process_limit', '1000') }}))"
 ) }}
