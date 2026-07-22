@@ -23,8 +23,8 @@
     pre_hook=["DELETE FROM " ~ this ~ " WHERE 1=1"] if (has_new_duids and is_incremental()) else []
 ) }}
 
--- Ensure download runs first by depending on stg_csv_archive_log
--- {{ ref('stg_csv_archive_log') }}
+-- Ensure the download runs first
+-- depends_on: {{ ref('stg_csv_archive_log') }}
 
 {% if has_new_duids %}
 WITH
