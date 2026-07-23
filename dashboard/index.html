@@ -761,6 +761,18 @@ async function ensureWindow() {
     const { from, to } = getRange();
     const grain = grainFor(spanDays(from, to));
     if (loadedWindow && loadedWindow.grainKey === grain.key && loadedWindow.from === from && loadedWindow.to === to) return false;
+    // Same grain, different range: render the overlapping slice we already have
+    // locally right away and let the background sync trim/extend the window —
+    // range changes never block the UI on remote reads.
+    if (loadedWindow && loadedWindow.grainKey === grain.key && twinExists) {
+        await q(`DELETE FROM twin WHERE date < DATE '${from}' OR date > DATE '${to}'`);
+        const s = (await q(`SELECT count(*) AS n FROM twin`))[0];
+        if (num(s.n) > 0) {
+            loadedWindow = { grainKey: grain.key, from, to, rows: num(s.n) };
+            console.log(`[cache] range change: rendering ${num(s.n)} overlapping cached rows, syncing in background`);
+            return true;
+        }
+    }
     if (!loadedWindow || loadedWindow.grainKey !== grain.key) {
         twinExists = false;
         twinSnapshotId = null;
@@ -1096,9 +1108,9 @@ async function renderMap(seq) {
 // ---------------------------------------------------------------------------
 // Orchestration
 // ---------------------------------------------------------------------------
-let running = false;
+let running = false, rerunQueued = false;
 async function renderAll() {
-    if (running) { return; }
+    if (running) { rerunQueued = true; return; }   // slider moved mid-render: run again after
     running = true;
     const seq = ++_renderSeq;
     document.querySelectorAll('.charts, .kpi-row').forEach(el => el.classList.add('loading'));
@@ -1122,6 +1134,7 @@ async function renderAll() {
         document.querySelectorAll('.charts, .kpi-row').forEach(el => el.classList.remove('loading'));
         running = false;
     }
+    if (rerunQueued) { rerunQueued = false; renderAll(); return; }
     // Background reconcile runs detached so renderAll (and start()) resolve at first paint.
     if (refreshAfter && seq === _renderSeq) {
         (async () => {
