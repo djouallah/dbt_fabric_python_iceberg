@@ -669,12 +669,22 @@ function planBatches(dates, files, maxDates, maxFiles) {
 
 async function loadDates(grain, dates, files, createFirst) {
     const T = tw(grain);
+    const st = gs(grain);
+    const myGen = st.gen || 0;
     if (createFirst) await q(`CREATE OR REPLACE TEMP TABLE ${T} AS SELECT ${grain.select} FROM ${DUMMY_ROW} ${grain.group}`);
-    for (const b of planBatches(dates, files, 7, 6)) {
+    // newest first — the dates a user is looking at land before deep history
+    for (const b of planBatches(dates, files, 7, 6).reverse()) {
+        // The table may have been reloaded (prefetch handoff, grain switch)
+        // while this loop was in flight — writing into the new copy would
+        // double-count, so a superseded load aborts.
+        if ((st.gen || 0) !== myGen) { console.log('[cache] load superseded — aborting'); return false; }
+        const dlist = b.dates.map(d => `DATE '${d}'`).join(', ');
+        await q(`DELETE FROM ${T} WHERE date IN (${dlist})`);   // idempotent batches
         const sql = `INSERT INTO ${T} SELECT ${grain.select} FROM read_parquet([${b.files.map(f => `'${toHttps(f)}'`).join(', ')}]) f
-                     WHERE f.date IN (${b.dates.map(d => `DATE '${d}'`).join(', ')}) ${grain.group}`;
+                     WHERE f.date IN (${dlist}) ${grain.group}`;
         try { await q(sql); } catch (e) { await q(sql); }
     }
+    return true;
 }
 
 function getRange() { return { from: $('dateFrom').value, to: $('dateTo').value }; }
@@ -705,8 +715,10 @@ async function buildFull(grain, from, to) {
     await getSummaryInfo();
     const files = (await snapshotFiles(summaryInfo.snapshot)).filter(f => overlaps(f, from, to));
     console.log(`[cache] cold build: ${files.length} file(s) overlap ${from}..${to}`);
+    const st = gs(grain);
+    st.exists = true;
+    st.gen = (st.gen || 0) + 1;
     await loadDates(grain, datesBetween(from, to), files, true);
-    gs(grain).exists = true;
     return finishWindow(grain, from, to);
 }
 
@@ -775,7 +787,7 @@ async function syncWindow(grain, from, to) {
         if (toLoad.length) {
             const files = (await snapshotFiles(summaryInfo.snapshot)).filter(f => toLoad.some(d => overlaps(f, d, d)));
             console.log(`[cache] loading ${toLoad.length} date(s) from ${files.length} file(s)`);
-            await loadDates(grain, toLoad, files, false);
+            if (await loadDates(grain, toLoad, files, false) === false) return loadedWindow && loadedWindow.rows;
         }
         return finishWindow(grain, from, to);
     } catch (e) {
@@ -800,7 +812,20 @@ async function ensureWindow() {
             console.log('[cache] table was rebuilt (uuid changed) — cached data has no lineage, rebuilding');
         } else if (stored) {
             const meta = await tableFromOpfs(tw(grain), `twin_${grain.key}`);
-            if (meta) { st.exists = true; st.snapshotId = meta.snapshotId || null; }
+            if (meta) {
+                st.exists = true;
+                st.snapshotId = meta.snapshotId || null;
+                st.gen = (st.gen || 0) + 1;
+                // Self-heal: a past load race may have persisted duplicated
+                // buckets — detect and dedupe before rendering anything.
+                const dup = (await q(`SELECT (count(*) - count(DISTINCT (t, DUID)))::INT AS d FROM ${tw(grain)}`))[0];
+                if (num(dup.d) > 0) {
+                    console.warn(`[cache] healing ${num(dup.d)} duplicated bucket(s) in ${tw(grain)}`);
+                    await q(`CREATE OR REPLACE TEMP TABLE ${tw(grain)} AS
+                             SELECT * FROM ${tw(grain)} QUALIFY row_number() OVER (PARTITION BY t, DUID) = 1`);
+                    st.gen = (st.gen || 0) + 1;
+                }
+            }
         }
     }
     if (st.exists) {
@@ -876,7 +901,7 @@ async function prefetchAll(histFromOverride) {
             const dates = datesBetween(p.from, today).filter(d => !have.has(d));
             if (!dates.length) { console.log(`[prefetch] ${p.label}: already covered`); continue; }
             console.log(`[prefetch] ${p.label}: ${dates.length} date(s) to load`);
-            const batches = planBatches(dates, allFiles, p.maxDates, p.maxFiles);
+            const batches = planBatches(dates, allFiles, p.maxDates, p.maxFiles).reverse();   // newest first
             let done = 0;
             for (const b of batches) {
                 const sql = `INSERT INTO t SELECT ${grain.select} FROM read_parquet([${b.files.map(f => `'${toHttps(f)}'`).join(', ')}]) f
@@ -897,6 +922,7 @@ async function prefetchAll(histFromOverride) {
                 // make the interactive side reload this grain from the richer cache
                 const live = gs(grain);
                 live.exists = false; live.snapshotId = null;
+                live.gen = (live.gen || 0) + 1;   // abort any in-flight load into the old copy
                 if (loadedWindow && loadedWindow.grainKey === p.key) loadedWindow = null;
             }
             console.log(`[prefetch] ${p.label}: done — ${Number(st.n).toLocaleString()} rows cached (${st.mn}..${st.mx})`);
@@ -1015,12 +1041,21 @@ async function renderGeneration(seq, grain) {
 
     const bySeries = new Map(names.map(n => [n, new Map()]));
     const tset = new Set();
+    const haveDates = new Set();
     for (const r of rows) {
         tset.add(r.t);
+        haveDates.add(fmtTs(r.t, false));
         const m = bySeries.get(r.series);
         if (m) m.set(r.t, r.v);
     }
-    const ts = [...tset].sort((a, b) => a - b);
+    // Dates with no local data yet (still prefetching / genuine holes) get an
+    // explicit null marker so the chart shows a BREAK instead of silently
+    // interpolating a straight band across the gap.
+    const gapTs = new Set();
+    for (const d of datesBetween(loadedWindow.from, loadedWindow.to)) {
+        if (!haveDates.has(d)) gapTs.add(Date.parse(d + 'T12:00:00Z'));
+    }
+    const ts = [...tset, ...gapTs].sort((a, b) => a - b);
     const large = ts.length > 2000;
 
     const series = names.map((name, i) => ({
@@ -1029,7 +1064,7 @@ async function renderGeneration(seq, grain) {
         emphasis: { focus: 'series' }, triggerLineEvent: true,
         sampling: 'lttb', large, progressive: large ? 500 : 0,
         itemStyle: { color: drill ? PALETTE[i % PALETTE.length] : fuelColor(name) },
-        data: ts.map(t => [t, bySeries.get(name).get(t) || 0]),
+        data: ts.map(t => [t, gapTs.has(t) ? null : (bySeries.get(name).get(t) || 0)]),
     }));
 
     let hovered = '';
@@ -1108,7 +1143,15 @@ async function renderPrice(seq, grain) {
 
     const regions = [...new Set(rows.map(r => r.region))].sort();
     const byRegion = new Map(regions.map(r => [r, []]));
+    const haveDates = new Set(rows.map(r => fmtTs(r.t, false)));
     for (const r of rows) byRegion.get(r.region).push([r.t, Math.round(r.price * 100) / 100]);
+    for (const d of datesBetween(loadedWindow.from, loadedWindow.to)) {
+        if (!haveDates.has(d)) {
+            const t = Date.parse(d + 'T12:00:00Z');
+            for (const arr of byRegion.values()) arr.push([t, null]);   // break, don't interpolate
+        }
+    }
+    for (const arr of byRegion.values()) arr.sort((a, b) => a[0] - b[0]);
     const large = rows.length > 10000;
 
     const series = regions.map((region, i) => ({
