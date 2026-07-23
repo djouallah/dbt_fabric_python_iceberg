@@ -434,9 +434,27 @@ const gcov = {};                 // grain.key -> { from, to, rows }
 const tw = g => `tw_${g.key}`;
 function resetGrains() { for (const k in gcov) delete gcov[k]; loadedWindow = null; }
 
-async function tableHasData(tbl) {
-    try { return Number((await q(`SELECT count(*) AS n FROM cached_files WHERE tbl = '${esc(tbl)}'`))[0].n) > 0; }
+async function tableExists(tbl) {
+    try { return Number((await q(`SELECT count(*) AS n FROM information_schema.tables WHERE table_name = '${esc(tbl)}'`))[0].n) > 0; }
     catch (e) { return false; }
+}
+async function tableReady(tbl) {
+    if (!(await tableExists(tbl))) return false;
+    try { return Number((await q(`SELECT count(*) AS n FROM ${tbl}`))[0].n) > 0; }
+    catch (e) { return false; }
+}
+// Bookkeeping (cached_files/cache_state) and the physical table can diverge if a
+// prior run was interrupted or OPFS persisted one but not the other. Trust the
+// physical table: if it's missing/empty but bookkeeping claims data, wipe the
+// stale bookkeeping so the next sync re-imports from scratch instead of trusting
+// a phantom file list (which would leave the table permanently missing).
+async function reconcile(tbl) {
+    const booked = Number((await q(`SELECT count(*) AS n FROM cached_files WHERE tbl = '${esc(tbl)}'`))[0].n) > 0;
+    if (booked && !(await tableReady(tbl))) {
+        console.warn(`[cache] ${tbl}: bookkeeping/table mismatch — clearing stale cache`);
+        await wipeTable(tbl);
+    }
+    return await tableReady(tbl);
 }
 async function setState(tbl, meta) {
     await q(`DELETE FROM cache_state WHERE tbl = '${esc(tbl)}'`);
@@ -616,16 +634,23 @@ async function syncTable(tbl, opts = {}) {
         await q(`DELETE FROM cached_files WHERE tbl = '${esc(tbl)}' AND path IN (${toDel.map(p => `'${esc(p)}'`).join(', ')})`);
     }
     let toAdd = sortNewest(files.filter(f => !have.has(f.fp)));   // newest first
+    let imported = 0;
     if (toAdd.length && priorityRange && onPriorityDone) {
         // Import the files overlapping the visible window first, render, then
         // continue with the rest in the background — the default view lands early.
         const pri = toAdd.filter(f => overlaps(f, priorityRange.from, priorityRange.to));
         const rest = toAdd.filter(f => !overlaps(f, priorityRange.from, priorityRange.to));
-        await ingestFiles(tbl, pri, onProgress);
-        if (pri.length) await onPriorityDone();
-        await ingestFiles(tbl, rest, onProgress);
+        imported += await ingestFiles(tbl, pri, onProgress);
+        if (pri.length && await tableExists(tbl)) await onPriorityDone();   // only render once the table really exists
+        imported += await ingestFiles(tbl, rest, onProgress);
     } else {
-        await ingestFiles(tbl, toAdd, onProgress);
+        imported += await ingestFiles(tbl, toAdd, onProgress);
+    }
+    // If we set out to import files but none landed, the table may not exist —
+    // don't record a snapshot (that would make the next run think it's current).
+    // Surface the real cause instead of a downstream "table does not exist".
+    if (toAdd.length && !(await tableExists(tbl))) {
+        throw new Error(`${tbl}: imported 0 of ${toAdd.length} data file(s) — downloads failed (check network/CORS/auth)`);
     }
     await setState(tbl, meta);
     if (persistent) { try { await q(`CHECKPOINT`); } catch (e) {} }
@@ -642,6 +667,7 @@ function getRange() { return { from: $('dateFrom').value, to: $('dateTo').value 
 // ---------------------------------------------------------------------------
 async function ensureGrain(from, to) {
     const grain = grainFor(spanDays(from, to));
+    if (!(await tableExists('fct_summary'))) throw new Error('no data imported yet — import from OneLake first');
     const cov = gcov[grain.key];
     if (cov && cov.from <= from && cov.to >= to) {
         loadedWindow = { grainKey: grain.key, from, to, rows: cov.rows };
@@ -1209,9 +1235,10 @@ async function start(token) {
 
     $('sqlbox').value = `SELECT d.State, round(sum(f.mw) / 12) AS mwh\nFROM fct_summary f\nJOIN dim_duid d ON f.DUID = d.DUID\nWHERE f.date >= DATE '${minusDays(end, 1)}'\nGROUP BY 1 ORDER BY 2 DESC;`;
 
-    // Dimensions: if already imported, build tdim from the local copy instantly;
-    // otherwise pull it (tiny). Filters need it before the first render.
-    if (await tableHasData('dim_duid')) {
+    // Dimensions: if already imported (and physically present), build tdim from
+    // the local copy instantly; otherwise pull it (tiny). Filters need it before
+    // the first render. reconcile() clears any stale bookkeeping first.
+    if (await reconcile('dim_duid')) {
         await buildTdim();
         await populateFilters();
     } else {
@@ -1222,7 +1249,7 @@ async function start(token) {
     }
 
     const { from, to } = getRange();
-    if (await tableHasData('fct_summary')) {
+    if (await reconcile('fct_summary')) {
         // Warm cache: render instantly from the local DB, then check OneLake in
         // the background and re-render only if a new snapshot changed the files.
         await renderAll();
