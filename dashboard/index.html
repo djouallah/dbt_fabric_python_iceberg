@@ -229,7 +229,7 @@ footer a { color: inherit; }
 </footer>
 
 <script type="module">
-import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev57.0/+esm";
+import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@latest/+esm";
 import * as msal from "https://cdn.jsdelivr.net/npm/@azure/msal-browser@3/+esm";
 const echarts = window.echarts;
 
@@ -487,7 +487,7 @@ function grainFor(days) {
     };
 }
 
-const CACHE_VER = 'v2';
+const CACHE_VER = 'v4';   // v4: snapshot-diff sync (no signature columns)
 const cacheFile = key => `aemo_${CACHE_VER}_${key}.parquet`;
 const cacheMetaKey = key => `aemo_meta_${CACHE_VER}_${key}`;
 
@@ -538,37 +538,221 @@ async function tableFromOpfs(table, key) {
 // loadedWindow: { grainKey, from, to, rows } describing what `twin` holds
 let loadedWindow = null;
 let twinExists = false;
+let summaryInfo = null;   // {uuid, snapshot} of fct_summary from the catalog
+
+// One REST call to the Iceberg catalog: table-uuid changes on a rebuild
+// (drop/CREATE OR REPLACE), current-snapshot-id advances on every commit, and
+// the snapshots array carries each snapshot's manifest-list — everything the
+// snapshot diff needs.
+const toHttps = u => String(u).replace(`abfss://${WORKSPACE}@onelake.dfs.fabric.microsoft.com/`, `https://onelake.dfs.fabric.microsoft.com/${WORKSPACE}/`);
+
+async function fetchTableMeta(name) {
+    try {
+        const r = await fetch(`${ENDPOINT}/v1/${WORKSPACE}/${LAKEHOUSE}/namespaces/mart/tables/${name}`,
+            { headers: { Authorization: `Bearer ${currentToken}` } });
+        if (!r.ok) return null;
+        const m = (await r.json()).metadata || {};
+        const manifestLists = new Map((m.snapshots || []).map(s => [String(s['snapshot-id']), s['manifest-list']]));
+        return { uuid: m['table-uuid'], snapshot: String(m['current-snapshot-id'] ?? ''), manifestLists };
+    } catch (e) { return null; }
+}
+
+async function fetchAuthed(url) {
+    const r = await fetch(toHttps(url), { headers: { Authorization: `Bearer ${currentToken}` } });
+    if (!r.ok) throw new Error(`fetch ${r.status} for ${url.slice(-60)}`);
+    return new Uint8Array(await r.arrayBuffer());
+}
+
+let _regSeq = 0;
+async function readAvroRows(url, columnsSql) {
+    const name = `meta_${++_regSeq}.avro`;
+    await db.registerFileBuffer(name, await fetchAuthed(url));
+    try { return await q(`SELECT ${columnsSql} FROM read_avro('${name}')`); }
+    finally { try { await db.dropFile(name); } catch (e) {} }
+}
+
+// ---------------------------------------------------------------------------
+// Manifest layer — the Iceberg snapshot primitives. Manifests are fetched to
+// local buffers (WASM httpfs truncates larger avro files) and parsed with
+// read_avro; each data-file entry carries per-column lower/upper bounds, so
+// field id 1 (`date`) gives every file's date range with zero data reads.
+// Data itself is then read with plain read_parquet on exactly the overlapping
+// files — the attached-catalog scan path is avoided entirely for the window
+// (date-filtered iceberg scans currently stack-overflow in duckdb-wasm).
+// ---------------------------------------------------------------------------
+const _manifestCache = new Map();   // manifest url -> [{fp, dateMin, dateMax}]
+
+function boundsToDate(v) {
+    if (v == null) return null;
+    const a = v.toJSON ? v.toJSON() : v;
+    const bytes = Array.isArray(a) ? a[0] : a;
+    if (bytes == null) return null;
+    const u = bytes instanceof Uint8Array ? bytes : Uint8Array.from(Object.values(bytes));
+    if (u.length < 4) return null;
+    return new Date(new DataView(u.buffer, u.byteOffset, 4).getInt32(0, true) * 86400000).toISOString().slice(0, 10);
+}
+
+async function readManifest(url) {
+    if (_manifestCache.has(url)) return _manifestCache.get(url);
+    const name = `meta_${++_regSeq}.avro`;
+    await db.registerFileBuffer(name, await fetchAuthed(url));
+    let rows;
+    try {
+        const t = await conn.query(`SELECT status, data_file.file_path AS fp,
+                                           map_extract(data_file.lower_bounds, 1) AS lb,
+                                           map_extract(data_file.upper_bounds, 1) AS ub
+                                    FROM read_avro('${name}')`);
+        rows = t.toArray().map(r => r.toJSON());
+    } finally { try { await db.dropFile(name); } catch (e) {} }
+    const out = rows.filter(r => Number(r.status) !== 2)
+        .map(r => ({ fp: r.fp, dateMin: boundsToDate(r.lb), dateMax: boundsToDate(r.ub) }));
+    _manifestCache.set(url, out);
+    return out;
+}
+
+async function manifestPaths(snapshotId) {
+    const ml = summaryInfo && summaryInfo.manifestLists.get(String(snapshotId));
+    if (!ml) throw new Error('snapshot not in table lineage');
+    return (await readAvroRows(ml, 'manifest_path')).map(r => r.manifest_path);
+}
+
+async function snapshotFiles(snapshotId) {
+    const files = [];
+    for (const p of await manifestPaths(snapshotId)) files.push(...await readManifest(p));
+    return files;
+}
+
+const overlaps = (f, from, to) => (f.dateMin == null || f.dateMin <= to) && (f.dateMax == null || f.dateMax >= from);
+function datesBetween(from, to) {
+    const out = [];
+    for (let d = from; d <= to; d = minusDays(d, -1)) out.push(d);
+    return out;
+}
+
+// Read the given dates from the given file set with plain read_parquet, in
+// batches that keep every file of a date inside one query (so grain buckets
+// never split across batches). Retries each batch once on transient failures.
+const DUMMY_ROW = `(SELECT DATE '1900-01-01' AS date, 0 AS time, '' AS DUID, 0.0 AS mw, 0.0 AS price, TIMESTAMPTZ '1900-01-01 00:00:00+00' AS cutoff) f WHERE 1 = 0`;
+async function loadDates(grain, dates, files, createFirst) {
+    if (createFirst) await q(`CREATE OR REPLACE TEMP TABLE twin AS SELECT ${grain.select} FROM ${DUMMY_ROW} ${grain.group}`);
+    const sorted = [...dates].sort();
+    let i = 0, batches = 0;
+    while (i < sorted.length) {
+        const batchDates = [sorted[i]];
+        let fset = new Set(files.filter(f => overlaps(f, sorted[i], sorted[i])).map(f => f.fp));
+        let j = i + 1;
+        while (j < sorted.length && batchDates.length < 7) {
+            const next = new Set([...fset, ...files.filter(f => overlaps(f, sorted[j], sorted[j])).map(f => f.fp)]);
+            if (next.size > 6 && fset.size) break;
+            fset = next; batchDates.push(sorted[j]); j++;
+        }
+        i = j;
+        if (fset.size) {
+            const sql = `INSERT INTO twin SELECT ${grain.select} FROM read_parquet([${[...fset].map(f => `'${toHttps(f)}'`).join(', ')}]) f
+                         WHERE f.date IN (${batchDates.map(d => `DATE '${d}'`).join(', ')}) ${grain.group}`;
+            try { await q(sql); } catch (e) { await q(sql); }
+        }
+        batches++;
+    }
+    return batches;
+}
 
 function getRange() { return { from: $('dateFrom').value, to: $('dateTo').value }; }
 
-// Trim twin to [from,to] and remote-fetch only the missing dates (head and/or
-// tail; the max cached date is always re-fetched — it may have been partial).
-async function adjustWindow(grain, from, to) {
-    if (!twinExists) {
-        await rq(`CREATE OR REPLACE TEMP TABLE twin AS SELECT ${grain.select}
-                  FROM onelake.mart.fct_summary f
-                  WHERE f.date >= DATE '${from}' AND f.date <= DATE '${to}' ${grain.group}`);
-        twinExists = true;
-    } else {
-        await q(`DELETE FROM twin WHERE date < DATE '${from}' OR date > DATE '${to}'`);
-        const have = (await q(`SELECT min(date)::varchar AS mn, max(date)::varchar AS mx FROM twin`))[0];
-        if (!have.mn) {
-            await rq(`INSERT INTO twin SELECT ${grain.select} FROM onelake.mart.fct_summary f
-                      WHERE f.date >= DATE '${from}' AND f.date <= DATE '${to}' ${grain.group}`);
-        } else {
-            if (have.mn > from) {
-                await rq(`INSERT INTO twin SELECT ${grain.select} FROM onelake.mart.fct_summary f
-                          WHERE f.date >= DATE '${from}' AND f.date < DATE '${have.mn}' ${grain.group}`);
-            }
-            await q(`DELETE FROM twin WHERE date >= DATE '${have.mx}'`);
-            await rq(`INSERT INTO twin SELECT ${grain.select} FROM onelake.mart.fct_summary f
-                      WHERE f.date >= DATE '${have.mx}' AND f.date <= DATE '${to}' ${grain.group}`);
-        }
-    }
+let twinSnapshotId = null;   // the snapshot the current twin content reflects
+
+async function finishWindow(grain, from, to) {
     const s = (await q(`SELECT count(*) AS n FROM twin`))[0];
     loadedWindow = { grainKey: grain.key, from, to, rows: num(s.n) };
-    tableToOpfs('twin', `twin_${grain.key}`, loadedWindow);   // fire-and-forget persist
+    if (!summaryInfo) summaryInfo = await fetchTableMeta('fct_summary');
+    twinSnapshotId = summaryInfo && summaryInfo.snapshot;
+    tableToOpfs('twin', `twin_${grain.key}`, {                // fire-and-forget persist
+        ...loadedWindow,
+        tableUuid: summaryInfo && summaryInfo.uuid,
+        snapshotId: twinSnapshotId,
+    });
     return loadedWindow.rows;
+}
+
+// Cold path: no local copy at all. Files overlapping the window come straight
+// from the current snapshot's manifests; data is read with read_parquet only.
+async function buildFull(grain, from, to) {
+    if (!summaryInfo) summaryInfo = await fetchTableMeta('fct_summary');
+    const files = (await snapshotFiles(summaryInfo.snapshot)).filter(f => overlaps(f, from, to));
+    console.log(`[cache] cold build: ${files.length} file(s) overlap ${from}..${to}`);
+    await loadDates(grain, datesBetween(from, to), files, true);
+    twinExists = true;
+    return finishWindow(grain, from, to);
+}
+
+// Snapshot-primitive sync. Change detection is METADATA ONLY:
+//   1. the two snapshots' manifest-lists (from the catalog REST response) are
+//      diffed to find manifests unique to either side,
+//   2. those manifests (avro, fetched to local buffers — WASM httpfs truncates
+//      larger avro files — and parsed with read_avro) yield the added/removed
+//      data files,
+//   3. parquet_metadata footer stats map changed files to their date ranges.
+// Only then does one targeted DELETE+INSERT touch data, restricted to the
+// affected dates ∩ window — which Iceberg prunes to essentially the changed
+// files. Nothing here scans table data to *detect* change.
+const MAX_DIFF_MANIFESTS = 60;
+
+async function syncWindow(grain, from, to) {
+    try {
+        if (!summaryInfo) summaryInfo = await fetchTableMeta('fct_summary');
+        if (!twinSnapshotId) throw new Error('no snapshot recorded for local window');
+        let affected = [];
+        if (twinSnapshotId !== summaryInfo.snapshot) {
+            // Snapshot diff: only manifests unique to either snapshot matter —
+            // shared manifests contribute identical files to both sides.
+            const [cachedMans, currentMans] = await Promise.all([
+                manifestPaths(twinSnapshotId), manifestPaths(summaryInfo.snapshot),
+            ]);
+            const cachedSet = new Set(cachedMans), currentSet = new Set(currentMans);
+            const onlyCached = cachedMans.filter(p => !currentSet.has(p));
+            const onlyCurrent = currentMans.filter(p => !cachedSet.has(p));
+            if (onlyCached.length + onlyCurrent.length > MAX_DIFF_MANIFESTS) throw new Error(`${onlyCached.length + onlyCurrent.length} manifests changed — diff too large`);
+            const filesOf = async paths => {
+                const out = new Map();
+                for (const p of paths) for (const f of await readManifest(p)) out.set(f.fp, f);
+                return out;
+            };
+            const cachedFiles = await filesOf(onlyCached);
+            const currentFiles = await filesOf(onlyCurrent);
+            const changed = [
+                ...[...currentFiles.values()].filter(f => !cachedFiles.has(f.fp)),   // added
+                ...[...cachedFiles.values()].filter(f => !currentFiles.has(f.fp)),   // removed
+            ];
+            console.log(`[cache] snapshot diff: ${onlyCurrent.length}+${onlyCached.length} manifest(s), ${changed.length} data file(s) changed`);
+            const days = new Set();
+            for (const f of changed) {
+                if (!f.dateMin || !f.dateMax) { affected = datesBetween(from, to); break; }
+                for (const d of datesBetween(f.dateMin < from ? from : f.dateMin, f.dateMax > to ? to : f.dateMax)) days.add(d);
+            }
+            if (!affected.length) affected = [...days].filter(d => d >= from && d <= to).sort();
+        }
+        await q(`DELETE FROM twin WHERE date < DATE '${from}' OR date > DATE '${to}'`);
+        if (affected.length) {
+            console.log(`[cache] syncing ${affected.length} affected date(s): ${affected.slice(0, 6).join(', ')}${affected.length > 6 ? '…' : ''}`);
+            await q(`DELETE FROM twin WHERE date IN (${affected.map(d => `DATE '${d}'`).join(', ')})`);
+        } else {
+            console.log('[cache] no changed files touch this window');
+        }
+        // Coverage gap-fill: dates never cached (range widened/shifted) are
+        // absent locally yet unchanged in the snapshot — the diff can't see
+        // them, so they load through the same path.
+        const have = new Set((await q(`SELECT DISTINCT date::varchar AS d FROM twin`)).map(r => r.d));
+        const toLoad = [...new Set([...affected, ...datesBetween(from, to).filter(d => !have.has(d))])];
+        if (toLoad.length) {
+            const files = (await snapshotFiles(summaryInfo.snapshot)).filter(f => toLoad.some(d => overlaps(f, d, d)));
+            console.log(`[cache] loading ${toLoad.length} date(s) from ${files.length} file(s)`);
+            await loadDates(grain, toLoad, files, false);
+        }
+        return finishWindow(grain, from, to);
+    } catch (e) {
+        console.warn(`[cache] snapshot diff unavailable (${String(e && e.message || e).slice(0, 120)}) — full window rebuild`);
+        return buildFull(grain, from, to);
+    }
 }
 
 // Returns true when a cached window was rendered stale-first (caller should
@@ -579,25 +763,42 @@ async function ensureWindow() {
     if (loadedWindow && loadedWindow.grainKey === grain.key && loadedWindow.from === from && loadedWindow.to === to) return false;
     if (!loadedWindow || loadedWindow.grainKey !== grain.key) {
         twinExists = false;
-        const meta = await tableFromOpfs('twin', `twin_${grain.key}`);
-        if (meta) {
-            twinExists = true;
-            // Cache covers the asked range (tail may be stale) -> render now, top up after
-            if (meta.from <= from && meta.to >= minusDays(to, 1)) {
-                await q(`DELETE FROM twin WHERE date < DATE '${from}' OR date > DATE '${to}'`);
-                const s = (await q(`SELECT count(*) AS n FROM twin`))[0];
-                if (num(s.n) > 0) {
-                    console.log(`[cache] rendering ${num(s.n)} cached rows, refreshing in background`);
-                    loadedWindow = { grainKey: grain.key, from, to, rows: num(s.n) };
-                    return true;
+        twinSnapshotId = null;
+        summaryInfo = await fetchTableMeta('fct_summary');
+        const stored = JSON.parse(localStorage.getItem(cacheMetaKey(`twin_${grain.key}`)) || 'null');
+        // A rebuilt table (new uuid) has a fresh snapshot lineage — the cached
+        // snapshot cannot be diffed against it, so this is the one cold-path case.
+        if (stored && summaryInfo && stored.tableUuid !== summaryInfo.uuid) {
+            console.log('[cache] table was rebuilt (uuid changed) — cached snapshot has no lineage, rebuilding window');
+        } else if (stored) {
+            const meta = await tableFromOpfs('twin', `twin_${grain.key}`);
+            if (meta) {
+                twinExists = true;
+                twinSnapshotId = meta.snapshotId || null;
+                // Cache covers the asked range -> render it now; syncWindow
+                // reconciles via snapshot diff in the background.
+                if (meta.from <= from && meta.to >= minusDays(to, 1)) {
+                    await q(`DELETE FROM twin WHERE date < DATE '${from}' OR date > DATE '${to}'`);
+                    const s = (await q(`SELECT count(*) AS n FROM twin`))[0];
+                    if (num(s.n) > 0) {
+                        loadedWindow = { grainKey: grain.key, from, to, rows: num(s.n) };
+                        const current = summaryInfo && meta.tableUuid === summaryInfo.uuid && meta.snapshotId === summaryInfo.snapshot;
+                        if (current && meta.from === from && meta.to === to) {
+                            console.log('[cache] snapshot unchanged — cache is current, no refresh needed');
+                            return false;
+                        }
+                        console.log(`[cache] rendering ${num(s.n)} cached rows, snapshot-diffing in background`);
+                        return true;
+                    }
+                } else {
+                    console.log(`[cache] range mismatch: cached ${meta.from}..${meta.to}, want ${from}..${to}`);
                 }
-            } else {
-                console.log(`[cache] range mismatch: cached ${meta.from}..${meta.to}, want ${from}..${to}`);
             }
         }
     }
     setStatus(`Reading Iceberg from OneLake (${from} → ${to})…`, 'loading');
-    await adjustWindow(grain, from, to);
+    if (twinExists && twinSnapshotId) await syncWindow(grain, from, to);
+    else await buildFull(grain, from, to);
     return false;
 }
 
@@ -921,16 +1122,16 @@ async function renderAll() {
         document.querySelectorAll('.charts, .kpi-row').forEach(el => el.classList.remove('loading'));
         running = false;
     }
-    // Background refresh runs detached so renderAll (and start()) resolve at first paint.
+    // Background reconcile runs detached so renderAll (and start()) resolve at first paint.
     if (refreshAfter && seq === _renderSeq) {
         (async () => {
             try {
                 const { from, to } = getRange();
-                await adjustWindow(grainFor(spanDays(from, to)), from, to);
+                await syncWindow(grainFor(spanDays(from, to)), from, to);
                 if (seq === _renderSeq) await renderAll();
             } catch (e) {
-                console.warn('background refresh failed', e);
-                setStatus('background refresh failed — showing cached data', 'error');
+                console.warn('background sync failed', e);
+                setStatus('background sync failed — showing cached data', 'error');
             }
         })();
     }
@@ -1031,6 +1232,7 @@ $('runsql').onclick = async () => {
     $('sqltable').replaceChildren();
     const t0 = performance.now();
     try {
+        await ensureAttach();
         const rows = await q($('sqlbox').value);
         const cols = rows.length ? Object.keys(rows[0]) : [];
         renderTable($('sqltable'), cols, rows.slice(0, 500));
@@ -1045,6 +1247,7 @@ $('csvsql').onclick = async () => {
     info.className = 'analyze-info';
     info.textContent = 'exporting…';
     try {
+        await ensureAttach();
         const exportConn = await db.connect();
         try {
             const reader = await exportConn.send($('sqlbox').value);
@@ -1099,13 +1302,17 @@ async function start(token) {
     setInterval(refreshTokenLoop, 10 * 60 * 1000);
 
     setStatus('Loading dimensions…');
-    const dimMeta = await tableFromOpfs('tdim', 'dim');
+    const dimInfo = await fetchTableMeta('dim_duid');
+    const dimStored = JSON.parse(localStorage.getItem(cacheMetaKey('dim')) || 'null');
+    const dimUuidOk = dimStored && dimInfo && dimStored.tableUuid && dimStored.tableUuid === dimInfo.uuid;
+    const dimFresh = dimUuidOk && Date.now() - dimStored.savedAt < 24 * 3600 * 1000;
+    const dimMeta = (dimFresh || (dimStored && !dimInfo)) ? await tableFromOpfs('tdim', 'dim') : null;
     console.log('[t] dims loaded', Math.round(performance.now()));
-    if (!dimMeta || Date.now() - dimMeta.savedAt > 24 * 3600 * 1000) {
+    if (!dimMeta) {
         await rq(`CREATE OR REPLACE TEMP TABLE tdim AS
                   SELECT DUID, Region, coalesce(FuelSourceDescriptor, 'Unknown') AS fuel, Participant, State, latitude, longitude
                   FROM onelake.mart.dim_duid`);
-        tableToOpfs('tdim', 'dim', {});
+        tableToOpfs('tdim', 'dim', { tableUuid: dimInfo && dimInfo.uuid, snapshotId: dimInfo && dimInfo.snapshot });
     }
     allDuids = await q(`SELECT DUID, Region, fuel FROM tdim ORDER BY DUID`);
     for (const r of await q(`SELECT DISTINCT Region FROM tdim ORDER BY 1`)) {
