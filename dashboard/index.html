@@ -43,6 +43,11 @@
   }
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
+* { scrollbar-width: thin; scrollbar-color: var(--baseline) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--baseline); border-radius: 4px; }
+*::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 body { font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--page); color: var(--ink); }
 header {
   padding: 0.45rem 1.4rem; border-bottom: 1px solid var(--border); background: var(--surface);
