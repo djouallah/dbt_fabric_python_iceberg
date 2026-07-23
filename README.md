@@ -158,7 +158,7 @@ The only GitHub secrets you need:
 
 On the Azure side, register an app and add a **federated credential** with subject `repo:<owner>/<repo>:ref:refs/heads/main`. Grant it the Fabric workspace permissions you need.
 
-Every branch runs the dbt build (run/test/docs) and publishes the site to GitHub Pages (dashboard at the root, dbt docs under `/dag/`). Only pushes to `main` deploy the Fabric items (`deploy.py` is hardcoded to one workspace).
+Every branch runs the dbt build (run/test/docs) and publishes the docs to GitHub Pages under `/dag/` (branch-based Pages on `gh-pages`). Dashboard-only changes skip all of that: `dashboard.yml` publishes `dashboard/` to the site root in ~30 seconds. Only pushes to `main` deploy the Fabric items (`deploy.py` is hardcoded to one workspace).
 
 ### Live dashboard (browser-side Iceberg reads)
 
