@@ -1,17 +1,10 @@
 name: 🚀 Deploy to Fabric
 
 on:
-  push:
-    branches: ["**"]
-    paths:
-      - "dbt/**"
-      - "fabric_items/**"
-      - "deploy.py"
-      - ".github/workflows/pipeline.yml"
-  # dashboard/** is NOT a trigger here — dashboard.yml deploys it to Pages in ~30s
-  # without running the dbt build.
-  # No schedule here — hourly data refreshes live in data.yml (lakehouse check + dbt build
-  # only), so scheduled runs never redeploy Fabric items or refresh the semantic model.
+  # Manual only — this workflow never runs on a code push. Deploying Fabric items
+  # (and refreshing the semantic model) is a deliberate act; trigger it from the
+  # Actions tab (or `gh workflow run pipeline.yml`) when you want to deploy.
+  # Hourly data refreshes live in data.yml; the dashboard deploys via dashboard.yml.
   workflow_dispatch:
 
 concurrency:
