@@ -504,9 +504,10 @@ async function wipeTable(tbl) {
 
 // loadedWindow is only the RENDER window { grainKey, from, to, rows }. Grain
 // tables tw_<grain> are TEMP aggregations rebuilt from the fct_summary view;
-// gcov tracks the date span each currently holds.
+// gcov tracks the date span each currently holds. tw_day is built over the full
+// cached span (so any year/sub-range reuses it); finer grains hold their window.
 let loadedWindow = null;
-const gcov = {};                 // grain.key -> { from, to, rows }
+const gcov = {};                 // grain.key -> { from, to } (span the tw_<grain> table holds)
 const tw = g => `tw_${g.key}`;
 function resetGrains() { for (const k in gcov) delete gcov[k]; loadedWindow = null; }
 
@@ -699,22 +700,40 @@ function getRange() { return { from: $('dateFrom').value, to: $('dateTo').value 
 // fct_summary table. grainFor() picks the bucket (5-min / hour / day) by span;
 // its select/group SQL is reused verbatim. Each grain caches the date span it
 // currently holds so an unchanged range re-renders with no rebuild.
+//
+// The `day` grain (any span >31d, e.g. a whole year) is the expensive one: it
+// rolls up the raw 5-min fct_summary, tens of millions of rows for a year. So
+// it is built ONCE over the FULL cached span — not the selected window — and
+// then every year/sub-range is served by a cheap window filter over the small
+// daily table (no re-aggregation). Finer grains stay windowed: their spans are
+// capped (≤31d hour / ≤3d 5-min) so their scans are cheap, and a full-history
+// hour/5-min table would be far too large to hold. resetGrains() drops this on
+// any sync so new data forces exactly one rebuild.
 // ---------------------------------------------------------------------------
 async function ensureGrain(from, to) {
     const grain = grainFor(spanDays(from, to));
     if (!cacheMeta.fct_summary || !cacheMeta.fct_summary.files.length) throw new Error('no data cached yet — import from OneLake first');
+    // Build span: full cached history for `day` (built once, reused for any
+    // sub-range), the selected window for finer grains. min/max reads parquet
+    // stats only — no data scan.
+    let bFrom = from, bTo = to;
+    if (grain.key === 'day') {
+        const s = (await q(`SELECT strftime(min(f.date), '%Y-%m-%d') AS lo, strftime(max(f.date), '%Y-%m-%d') AS hi FROM fct_summary f`))[0];
+        if (s && s.lo && s.hi) { bFrom = s.lo; bTo = s.hi; }
+    }
+    // Row count scoped to the RENDER window (the built table may span more).
+    const windowRows = async () => num((await q(`SELECT count(*) AS n FROM ${tw(grain)} WHERE date BETWEEN DATE '${from}' AND DATE '${to}'`))[0].n);
     const cov = gcov[grain.key];
-    if (cov && cov.from <= from && cov.to >= to) {
-        loadedWindow = { grainKey: grain.key, from, to, rows: cov.rows };
+    if (cov && cov.from <= bFrom && cov.to >= bTo) {
+        loadedWindow = { grainKey: grain.key, from, to, rows: await windowRows() };
         return;
     }
     const sql = `CREATE OR REPLACE TEMP TABLE ${tw(grain)} AS
                  SELECT ${grain.select} FROM fct_summary f
-                 WHERE f.date BETWEEN DATE '${from}' AND DATE '${to}' ${grain.group}`;
+                 WHERE f.date BETWEEN DATE '${bFrom}' AND DATE '${bTo}' ${grain.group}`;
     try { await q(sql); } catch (e) { await q(sql); }   // retry once — first scan after a (re)build can flake
-    const n = num((await q(`SELECT count(*) AS n FROM ${tw(grain)}`))[0].n);
-    gcov[grain.key] = { from, to, rows: n };
-    loadedWindow = { grainKey: grain.key, from, to, rows: n };
+    gcov[grain.key] = { from: bFrom, to: bTo };
+    loadedWindow = { grainKey: grain.key, from, to, rows: await windowRows() };
 }
 
 // Dimension temp table + filter dropdowns, rebuilt from the native dim_duid.
