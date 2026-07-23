@@ -288,9 +288,11 @@ const pca = new msal.PublicClientApplication({
     auth: { clientId: CLIENT_ID, authority: `https://login.microsoftonline.com/${TENANT}`, redirectUri: location.origin + location.pathname },
     cache: { cacheLocation: 'sessionStorage' },
 });
+const pcaReady = pca.initialize();
 let account = null;
 
 async function getToken(interactive) {
+    await pcaReady;
     if (interactive) {
         const res = await pca.loginPopup({ scopes: SCOPES });
         account = res.account;
