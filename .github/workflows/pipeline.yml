@@ -8,7 +8,7 @@ on:
       - "fabric_items/**"
       - "deploy.py"
       - ".github/workflows/pipeline.yml"
-  # dashboard/** is NOT a trigger here — dashboard.yml publishes it to gh-pages in ~30s
+  # dashboard/** is NOT a trigger here — dashboard.yml deploys it to Pages in ~30s
   # without running the dbt build.
   # No schedule here — hourly data refreshes live in data.yml (lakehouse check + dbt build
   # only), so scheduled runs never redeploy Fabric items or refresh the semantic model.
@@ -19,8 +19,8 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  id-token: write
-  contents: write   # peaceiris publishes dbt docs to the gh-pages branch
+  id-token: write   # OIDC federated login to Azure/Fabric
+  contents: read
 
 env:
   # DuckDB's azure extension reads OneLake over a curl transport (its default transport fails
@@ -153,20 +153,10 @@ jobs:
           cp dbt/target/run_results.json /tmp/test_results.json
           echo "T_DBT_TEST=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
 
-      - name: 📚 Phase 4 — dbt docs generate
-        # always(): docs still generate (and publish) when dbt run/test failed — a red run
-        # with fresh docs beats a red run with stale docs.
-        id: docs
-        if: always()
-        run: |
-          T0=$(date +%s)
-          dbt docs generate --target dev --project-dir dbt --profiles-dir dbt
-          echo "T_DBT_DOCS=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
-
-      - name: 🚀 Phase 5 — Deploy Fabric items
+      - name: 🚀 Phase 4 — Deploy Fabric items
         # deploy.py is hardcoded to one workspace, so only the main branch deploys the Fabric
         # items (Variable Library, notebook, semantic model, pipeline) and reschedules. Other
-        # branches still run Phases 1-4 to validate the dbt build.
+        # branches still run Phases 1-3 to validate the dbt build.
         run: |
           T0=$(date +%s)
           if [ "${{ github.ref_name }}" = "main" ] && [ "${{ github.event_name }}" != "schedule" ]; then
@@ -177,17 +167,6 @@ jobs:
             echo "DEPLOY_SKIPPED=true" >> "$GITHUB_ENV"
           fi
           echo "T_DEPLOY=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
-
-      - name: 🌐 Publish dbt docs to Pages (/dag)
-        # Branch-based Pages: docs land under /dag on gh-pages; keep_files leaves the
-        # dashboard at the site root (published independently by dashboard.yml) untouched.
-        if: ${{ always() && steps.docs.outcome == 'success' }}
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./dbt/target
-          destination_dir: dag
-          keep_files: true
 
       - name: 📝 Build dashboard summary
         if: always()

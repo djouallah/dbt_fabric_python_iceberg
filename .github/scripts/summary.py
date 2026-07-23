@@ -24,7 +24,6 @@ phases = [
     ('🏗️', 'Provision Lakehouse', env('T_LAKEHOUSE', '0')),
     ('🔨', 'dbt run',             env('T_DBT_RUN',   '0')),
     ('✅', 'dbt test',            env('T_DBT_TEST',  '0')),
-    ('📚', 'dbt docs',            env('T_DBT_DOCS',  '0')),
     ('🚀', 'Deploy Fabric',       env('T_DEPLOY',    '0')),
 ]
 total = sum(int(p[2] or 0) for p in phases)
@@ -56,14 +55,6 @@ try:
     ttotal = len(ts)
 except FileNotFoundError:
     tstat, ttotal = Counter(), 0
-
-try:
-    m = json.load(open('dbt/target/manifest.json'))
-    by_type = Counter(n.get('resource_type') for n in m.get('nodes', {}).values())
-    n_sources = len(m.get('sources', {}))
-    n_macros = len(m.get('macros', {}))
-except FileNotFoundError:
-    by_type, n_sources, n_macros = Counter(), 0, 0
 
 items = []
 if env('DEPLOY_SKIPPED') != 'true':
@@ -132,7 +123,6 @@ print('\n</td></tr>')
 # Row 2: dbt (run · test · docs) — full width, three sub-columns
 ok = rstat.get('success', 0); err = rstat.get('error', 0); skip = rstat.get('skipped', 0)
 tp = tstat.get('pass', 0); tf = tstat.get('fail', 0); tw = tstat.get('warn', 0); te = tstat.get('error', 0)
-icons = {'model': '🧱', 'test': '✅', 'seed': '🌱', 'snapshot': '📸', 'operation': '⚙️'}
 print('<tr><td colspan="2" valign="top">\n')
 print("### 🔨 dbt\n")
 print('<table><tr><td valign="top">\n')
@@ -156,19 +146,9 @@ print(f"| ✅ Pass | **{tp}** |")
 print(f"| ❌ Fail | **{tf}** |")
 print(f"| ⚠️ Warn | **{tw}** |")
 print(f"| 💥 Error | **{te}** |")
-print('\n</td><td valign="top">\n')
-# docs
-print(f"**📚 docs · {fmt(env('T_DBT_DOCS', '0'))}**\n")
-print("| Resource | Count |")
-print("| --- | ---: |")
-for k in ('model', 'test', 'seed', 'snapshot', 'operation'):
-    if by_type.get(k):
-        print(f"| {icons[k]} {k.title()}s | **{by_type[k]}** |")
-print(f"| 🔌 Sources | **{n_sources}** |")
-print(f"| 🧙 Macros | **{n_macros}** |")
-if page_url:
-    print(f"\n🔗 [Live docs]({page_url})")
 print('\n</td></tr></table>')
+if page_url:
+    print(f"\n🔗 [Live dashboard]({page_url})")
 print('\n</td></tr>')
 print("</table>\n")
 
@@ -178,9 +158,7 @@ print("```mermaid")
 print("flowchart LR")
 print("  A[🏗️ Lakehouse] --> B[🔨 dbt run]")
 print("  B --> C[✅ dbt test]")
-print("  C --> D[📚 dbt docs]")
-print("  D --> E[🚀 Deploy Fabric]")
-print("  E --> F[🌐 Publish docs]")
+print("  C --> D[🚀 Deploy Fabric]")
 print("```")
 print()
 print("---")

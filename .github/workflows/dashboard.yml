@@ -1,8 +1,9 @@
 name: 🌐 Publish dashboard
 
-# Fast path: publishes ONLY the dashboard to the gh-pages branch root (~30s).
-# The full pipeline (pipeline.yml) publishes dbt docs into /dag on its own cadence;
-# keep_files on both sides means neither publish wipes the other.
+# Publishes ONLY the dashboard, via GitHub's native Actions Pages deploy (no
+# gh-pages branch, no peaceiris, no auto pages-build-deployment runner). The
+# dbt pipeline (pipeline.yml) no longer touches Pages — the site is the dashboard
+# and nothing else.
 on:
   push:
     branches: [main]
@@ -12,32 +13,35 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
 
+# Serialize Pages deploys; don't cancel an in-flight one.
 concurrency:
-  group: gh-pages-publish
+  group: pages
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: 🌐 Publish to gh-pages
+  deploy:
+    name: 🌐 Deploy to Pages
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: 🌐 Publish dashboard to gh-pages root
-        uses: peaceiris/actions-gh-pages@v4
+      - name: ⚙️ Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: 📦 Upload dashboard artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./dashboard
-          keep_files: true   # never wipe /dag (dbt docs)
+          path: ./dashboard
 
-      - name: 📝 Summary
-        run: |
-          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
-          # 🌐 Dashboard Published
-
-          🔗 https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
-          EOF
+      - name: 🚀 Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
