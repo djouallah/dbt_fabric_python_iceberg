@@ -212,7 +212,7 @@ footer a { color: inherit; }
 <div id="view-analyze" hidden>
   <div class="analyze-wrap">
     <div class="analyze-head">
-      <label>SQL <span>— the attached catalog is live: onelake.mart.fct_summary / dim_duid / dim_calendar; the local window is twin (+ tdim)</span></label>
+      <label>SQL <span>— local (instant): tw_5min / tw_hour / tw_day + tdim · live catalog: onelake.mart.*</span></label>
       <button class="plain" id="runsql">Run</button>
       <button class="plain primary" id="csvsql">Download CSV</button>
     </div>
@@ -535,10 +535,25 @@ async function tableFromOpfs(table, key) {
     } catch (e) { console.warn('cache load', key, e); return null; }
 }
 
-// loadedWindow: { grainKey, from, to, rows } describing what `twin` holds
+// loadedWindow is only the RENDER window { grainKey, from, to, rows }. Each
+// grain keeps its own local table tw_<grain> that may hold far more than the
+// render window (prefetched history) — renders filter by date; nothing ever
+// trims the tables down to the view.
 let loadedWindow = null;
-let twinExists = false;
-let summaryInfo = null;   // {uuid, snapshot} of fct_summary from the catalog
+let summaryInfo = null;   // {uuid, snapshot, manifestLists} of fct_summary
+let summaryInfoAt = 0;
+const gstate = {};        // grain.key -> { exists, snapshotId }
+const gs = g => (gstate[g.key] = gstate[g.key] || { exists: false, snapshotId: null });
+const tw = g => `tw_${g.key}`;
+const grainByKey = k => k === '5min' ? grainFor(1) : k === 'hour' ? grainFor(7) : grainFor(90);
+
+async function getSummaryInfo(maxAgeMs = 60000) {
+    if (!summaryInfo || Date.now() - summaryInfoAt > maxAgeMs) {
+        const info = await fetchTableMeta('fct_summary');
+        if (info) { summaryInfo = info; summaryInfoAt = Date.now(); }
+    }
+    return summaryInfo;
+}
 
 // One REST call to the Iceberg catalog: table-uuid changes on a rebuild
 // (drop/CREATE OR REPLACE), current-snapshot-id advances on every commit, and
@@ -633,55 +648,65 @@ function datesBetween(from, to) {
 // batches that keep every file of a date inside one query (so grain buckets
 // never split across batches). Retries each batch once on transient failures.
 const DUMMY_ROW = `(SELECT DATE '1900-01-01' AS date, 0 AS time, '' AS DUID, 0.0 AS mw, 0.0 AS price, TIMESTAMPTZ '1900-01-01 00:00:00+00' AS cutoff) f WHERE 1 = 0`;
-async function loadDates(grain, dates, files, createFirst) {
-    if (createFirst) await q(`CREATE OR REPLACE TEMP TABLE twin AS SELECT ${grain.select} FROM ${DUMMY_ROW} ${grain.group}`);
+function planBatches(dates, files, maxDates, maxFiles) {
     const sorted = [...dates].sort();
-    let i = 0, batches = 0;
+    const plan = [];
+    let i = 0;
     while (i < sorted.length) {
         const batchDates = [sorted[i]];
         let fset = new Set(files.filter(f => overlaps(f, sorted[i], sorted[i])).map(f => f.fp));
         let j = i + 1;
-        while (j < sorted.length && batchDates.length < 7) {
+        while (j < sorted.length && batchDates.length < maxDates) {
             const next = new Set([...fset, ...files.filter(f => overlaps(f, sorted[j], sorted[j])).map(f => f.fp)]);
-            if (next.size > 6 && fset.size) break;
+            if (next.size > maxFiles && fset.size) break;
             fset = next; batchDates.push(sorted[j]); j++;
         }
         i = j;
-        if (fset.size) {
-            const sql = `INSERT INTO twin SELECT ${grain.select} FROM read_parquet([${[...fset].map(f => `'${toHttps(f)}'`).join(', ')}]) f
-                         WHERE f.date IN (${batchDates.map(d => `DATE '${d}'`).join(', ')}) ${grain.group}`;
-            try { await q(sql); } catch (e) { await q(sql); }
-        }
-        batches++;
+        if (fset.size) plan.push({ dates: batchDates, files: [...fset] });
     }
-    return batches;
+    return plan;
+}
+
+async function loadDates(grain, dates, files, createFirst) {
+    const T = tw(grain);
+    if (createFirst) await q(`CREATE OR REPLACE TEMP TABLE ${T} AS SELECT ${grain.select} FROM ${DUMMY_ROW} ${grain.group}`);
+    for (const b of planBatches(dates, files, 7, 6)) {
+        const sql = `INSERT INTO ${T} SELECT ${grain.select} FROM read_parquet([${b.files.map(f => `'${toHttps(f)}'`).join(', ')}]) f
+                     WHERE f.date IN (${b.dates.map(d => `DATE '${d}'`).join(', ')}) ${grain.group}`;
+        try { await q(sql); } catch (e) { await q(sql); }
+    }
 }
 
 function getRange() { return { from: $('dateFrom').value, to: $('dateTo').value }; }
 
-let twinSnapshotId = null;   // the snapshot the current twin content reflects
-
 async function finishWindow(grain, from, to) {
-    const s = (await q(`SELECT count(*) AS n FROM twin`))[0];
+    const s = (await q(`SELECT count(*) AS n, min(date)::varchar AS mn, max(date)::varchar AS mx FROM ${tw(grain)}`))[0];
     loadedWindow = { grainKey: grain.key, from, to, rows: num(s.n) };
-    if (!summaryInfo) summaryInfo = await fetchTableMeta('fct_summary');
-    twinSnapshotId = summaryInfo && summaryInfo.snapshot;
-    tableToOpfs('twin', `twin_${grain.key}`, {                // fire-and-forget persist
-        ...loadedWindow,
-        tableUuid: summaryInfo && summaryInfo.uuid,
-        snapshotId: twinSnapshotId,
-    });
-    return loadedWindow.rows;
+    await getSummaryInfo();
+    gs(grain).snapshotId = summaryInfo && summaryInfo.snapshot;
+    // Never clobber a bigger same-snapshot cache (the prefetcher may have just
+    // written full history while this table only holds the interactive window).
+    const stored = JSON.parse(localStorage.getItem(cacheMetaKey(`twin_${grain.key}`)) || 'null');
+    const clobber = stored && summaryInfo && stored.tableUuid === summaryInfo.uuid
+        && stored.snapshotId === gs(grain).snapshotId && stored.rows > num(s.n);
+    if (!clobber) {
+        tableToOpfs(tw(grain), `twin_${grain.key}`, {          // fire-and-forget persist
+            from: s.mn || from, to: s.mx || to, rows: num(s.n), grainKey: grain.key,
+            tableUuid: summaryInfo && summaryInfo.uuid,
+            snapshotId: gs(grain).snapshotId,
+        });
+    }
+    return num(s.n);
 }
 
 // Cold path: no local copy at all. Files overlapping the window come straight
 // from the current snapshot's manifests; data is read with read_parquet only.
 async function buildFull(grain, from, to) {
-    if (!summaryInfo) summaryInfo = await fetchTableMeta('fct_summary');
+    await getSummaryInfo();
     const files = (await snapshotFiles(summaryInfo.snapshot)).filter(f => overlaps(f, from, to));
     console.log(`[cache] cold build: ${files.length} file(s) overlap ${from}..${to}`);
     await loadDates(grain, datesBetween(from, to), files, true);
-    twinExists = true;
+    gs(grain).exists = true;
     return finishWindow(grain, from, to);
 }
 
@@ -698,15 +723,20 @@ async function buildFull(grain, from, to) {
 const MAX_DIFF_MANIFESTS = 60;
 
 async function syncWindow(grain, from, to) {
+    const st = gs(grain);
     try {
-        if (!summaryInfo) summaryInfo = await fetchTableMeta('fct_summary');
-        if (!twinSnapshotId) throw new Error('no snapshot recorded for local window');
+        await getSummaryInfo(15000);
+        if (!st.snapshotId) throw new Error('no snapshot recorded for local table');
+        // Reconcile scope = everything the local table covers, plus the window.
+        const cov = (await q(`SELECT min(date)::varchar AS mn, max(date)::varchar AS mx FROM ${tw(grain)}`))[0];
+        const scopeFrom = cov.mn && cov.mn < from ? cov.mn : from;
+        const scopeTo = cov.mx && cov.mx > to ? cov.mx : to;
         let affected = [];
-        if (twinSnapshotId !== summaryInfo.snapshot) {
+        if (st.snapshotId !== summaryInfo.snapshot) {
             // Snapshot diff: only manifests unique to either snapshot matter —
             // shared manifests contribute identical files to both sides.
             const [cachedMans, currentMans] = await Promise.all([
-                manifestPaths(twinSnapshotId), manifestPaths(summaryInfo.snapshot),
+                manifestPaths(st.snapshotId), manifestPaths(summaryInfo.snapshot),
             ]);
             const cachedSet = new Set(cachedMans), currentSet = new Set(currentMans);
             const onlyCached = cachedMans.filter(p => !currentSet.has(p));
@@ -726,22 +756,21 @@ async function syncWindow(grain, from, to) {
             console.log(`[cache] snapshot diff: ${onlyCurrent.length}+${onlyCached.length} manifest(s), ${changed.length} data file(s) changed`);
             const days = new Set();
             for (const f of changed) {
-                if (!f.dateMin || !f.dateMax) { affected = datesBetween(from, to); break; }
-                for (const d of datesBetween(f.dateMin < from ? from : f.dateMin, f.dateMax > to ? to : f.dateMax)) days.add(d);
+                if (!f.dateMin || !f.dateMax) { affected = datesBetween(scopeFrom, scopeTo); break; }
+                for (const d of datesBetween(f.dateMin < scopeFrom ? scopeFrom : f.dateMin, f.dateMax > scopeTo ? scopeTo : f.dateMax)) days.add(d);
             }
-            if (!affected.length) affected = [...days].filter(d => d >= from && d <= to).sort();
+            if (!affected.length) affected = [...days].filter(d => d >= scopeFrom && d <= scopeTo).sort();
         }
-        await q(`DELETE FROM twin WHERE date < DATE '${from}' OR date > DATE '${to}'`);
         if (affected.length) {
             console.log(`[cache] syncing ${affected.length} affected date(s): ${affected.slice(0, 6).join(', ')}${affected.length > 6 ? '…' : ''}`);
-            await q(`DELETE FROM twin WHERE date IN (${affected.map(d => `DATE '${d}'`).join(', ')})`);
+            await q(`DELETE FROM ${tw(grain)} WHERE date IN (${affected.map(d => `DATE '${d}'`).join(', ')})`);
         } else {
-            console.log('[cache] no changed files touch this window');
+            console.log('[cache] no changed files touch the local data');
         }
-        // Coverage gap-fill: dates never cached (range widened/shifted) are
-        // absent locally yet unchanged in the snapshot — the diff can't see
+        // Coverage gap-fill: window dates never cached (range widened/shifted)
+        // are absent locally yet unchanged in the snapshot — the diff can't see
         // them, so they load through the same path.
-        const have = new Set((await q(`SELECT DISTINCT date::varchar AS d FROM twin`)).map(r => r.d));
+        const have = new Set((await q(`SELECT DISTINCT date::varchar AS d FROM ${tw(grain)}`)).map(r => r.d));
         const toLoad = [...new Set([...affected, ...datesBetween(from, to).filter(d => !have.has(d))])];
         if (toLoad.length) {
             const files = (await snapshotFiles(summaryInfo.snapshot)).filter(f => toLoad.some(d => overlaps(f, d, d)));
@@ -755,72 +784,144 @@ async function syncWindow(grain, from, to) {
     }
 }
 
-// Returns true when a cached window was rendered stale-first (caller should
-// refresh in the background).
+// Returns true when local data was rendered stale-first (caller should
+// reconcile in the background).
 async function ensureWindow() {
     const { from, to } = getRange();
     const grain = grainFor(spanDays(from, to));
+    const st = gs(grain);
     if (loadedWindow && loadedWindow.grainKey === grain.key && loadedWindow.from === from && loadedWindow.to === to) return false;
-    // Same grain, different range: render the overlapping slice we already have
-    // locally right away and let the background sync trim/extend the window —
-    // range changes never block the UI on remote reads.
-    if (loadedWindow && loadedWindow.grainKey === grain.key && twinExists) {
-        await q(`DELETE FROM twin WHERE date < DATE '${from}' OR date > DATE '${to}'`);
-        const s = (await q(`SELECT count(*) AS n FROM twin`))[0];
-        if (num(s.n) > 0) {
-            loadedWindow = { grainKey: grain.key, from, to, rows: num(s.n) };
-            console.log(`[cache] range change: rendering ${num(s.n)} overlapping cached rows, syncing in background`);
-            return true;
-        }
-    }
-    if (!loadedWindow || loadedWindow.grainKey !== grain.key) {
-        twinExists = false;
-        twinSnapshotId = null;
-        summaryInfo = await fetchTableMeta('fct_summary');
+    if (!st.exists) {
+        await getSummaryInfo();
         const stored = JSON.parse(localStorage.getItem(cacheMetaKey(`twin_${grain.key}`)) || 'null');
         // A rebuilt table (new uuid) has a fresh snapshot lineage — the cached
         // snapshot cannot be diffed against it, so this is the one cold-path case.
         if (stored && summaryInfo && stored.tableUuid !== summaryInfo.uuid) {
-            console.log('[cache] table was rebuilt (uuid changed) — cached snapshot has no lineage, rebuilding window');
+            console.log('[cache] table was rebuilt (uuid changed) — cached data has no lineage, rebuilding');
         } else if (stored) {
-            const meta = await tableFromOpfs('twin', `twin_${grain.key}`);
-            if (meta) {
-                twinExists = true;
-                twinSnapshotId = meta.snapshotId || null;
-                // Cache covers the asked range -> render it now; syncWindow
-                // reconciles via snapshot diff in the background.
-                if (meta.from <= from && meta.to >= minusDays(to, 1)) {
-                    await q(`DELETE FROM twin WHERE date < DATE '${from}' OR date > DATE '${to}'`);
-                    const s = (await q(`SELECT count(*) AS n FROM twin`))[0];
-                    if (num(s.n) > 0) {
-                        loadedWindow = { grainKey: grain.key, from, to, rows: num(s.n) };
-                        const current = summaryInfo && meta.tableUuid === summaryInfo.uuid && meta.snapshotId === summaryInfo.snapshot;
-                        if (current && meta.from === from && meta.to === to) {
-                            console.log('[cache] snapshot unchanged — cache is current, no refresh needed');
-                            return false;
-                        }
-                        console.log(`[cache] rendering ${num(s.n)} cached rows, snapshot-diffing in background`);
-                        return true;
-                    }
-                } else {
-                    console.log(`[cache] range mismatch: cached ${meta.from}..${meta.to}, want ${from}..${to}`);
+            const meta = await tableFromOpfs(tw(grain), `twin_${grain.key}`);
+            if (meta) { st.exists = true; st.snapshotId = meta.snapshotId || null; }
+        }
+    }
+    if (st.exists) {
+        const cov = (await q(`SELECT min(date)::varchar AS mn, max(date)::varchar AS mx, count(*) AS n FROM ${tw(grain)}`))[0];
+        if (cov.mn) {
+            const full = cov.mn <= from && cov.mx >= minusDays(to, 1);
+            const partial = !full && cov.mx >= from && cov.mn <= to;
+            if (full || partial) {
+                loadedWindow = { grainKey: grain.key, from, to, rows: num(cov.n) };
+                await getSummaryInfo();
+                if (full && summaryInfo && st.snapshotId === summaryInfo.snapshot && cov.mx >= to) {
+                    console.log('[cache] snapshot unchanged — local data is current');
+                    return false;
                 }
+                console.log(`[cache] rendering local ${full ? 'coverage' : 'partial coverage'} (${cov.mn}..${cov.mx}), reconciling in background`);
+                return true;
             }
+            console.log(`[cache] no overlap: local ${cov.mn}..${cov.mx}, want ${from}..${to}`);
         }
     }
     setStatus(`Reading Iceberg from OneLake (${from} → ${to})…`, 'loading');
-    if (twinExists && twinSnapshotId) await syncWindow(grain, from, to);
+    if (st.exists && st.snapshotId) await syncWindow(grain, from, to);
     else await buildFull(grain, from, to);
     return false;
 }
 
 // ---------------------------------------------------------------------------
-// Filter helpers (twin w JOIN tdim d)
+// Background prefetcher: a SECOND throwaway DuckDB-WASM instance extends each
+// grain's OPFS cache — hourly to 31 days, 5-minute to 3 days, daily to FULL
+// HISTORY — without ever queueing behind the interactive connection, then
+// terminates. The page picks the caches up through the normal ensure path, so
+// after one visit every preset and custom range is local.
 // ---------------------------------------------------------------------------
-function whereScada(withDates = false) {
+let prefetchStarted = false;
+async function prefetchAll(histFromOverride) {
+    if (prefetchStarted) return;
+    prefetchStarted = true;
+    let pfWorker = null, pfDb = null, pfConn = null;
+    const pfq = async sql => await pfConn.query(sql);
+    try {
+        await getSummaryInfo();
+        const allFiles = await snapshotFiles(summaryInfo.snapshot);
+        const today = brisbaneToday();
+        const histMin = histFromOverride || allFiles.reduce((m, f) => (f.dateMin && (!m || f.dateMin < m)) ? f.dateMin : m, null) || minusDays(today, 365);
+        const plans = [
+            { key: 'hour', from: minusDays(today, 30), label: '31 days hourly', maxDates: 7, maxFiles: 6 },
+            { key: '5min', from: minusDays(today, 2), label: '3 days 5-minute', maxDates: 3, maxFiles: 6 },
+            { key: 'day', from: histMin, label: `daily history since ${histMin}`, maxDates: 45, maxFiles: 2 },
+        ];
+        const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
+        const patch = `(${workerPatch.toString()})(${JSON.stringify(WORKSPACE)}, ${JSON.stringify(currentToken)});\n`;
+        pfWorker = new Worker(URL.createObjectURL(new Blob([patch, `importScripts("${bundle.mainWorker}");`], { type: 'text/javascript' })));
+        pfDb = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), pfWorker);
+        await pfDb.instantiate(bundle.mainModule, bundle.pthreadWorker);
+        pfConn = await pfDb.connect();
+        await pfq(`SET preserve_insertion_order = false`);
+        for (const p of plans) {
+            const grain = grainByKey(p.key);
+            const key = `twin_${p.key}`;
+            let have = new Set();
+            const stored = JSON.parse(localStorage.getItem(cacheMetaKey(key)) || 'null');
+            const seed = stored && summaryInfo && stored.tableUuid === summaryInfo.uuid ? await opfsRead(cacheFile(key)) : null;
+            if (seed && seed.length) {
+                try { await pfDb.dropFile('seed.parquet'); } catch (e) {}
+                await pfDb.registerFileBuffer('seed.parquet', seed);
+                await pfq(`CREATE OR REPLACE TEMP TABLE t AS SELECT * FROM read_parquet('seed.parquet')`);
+                have = new Set((await pfq(`SELECT DISTINCT date::varchar AS d FROM t`)).toArray().map(r => r.toJSON().d));
+            } else {
+                await pfq(`CREATE OR REPLACE TEMP TABLE t AS SELECT ${grain.select} FROM ${DUMMY_ROW} ${grain.group}`);
+            }
+            // Prefetch only fills dates the cache has never seen; freshness of
+            // recent dates stays the interactive snapshot-diff's job.
+            const dates = datesBetween(p.from, today).filter(d => !have.has(d));
+            if (!dates.length) { console.log(`[prefetch] ${p.label}: already covered`); continue; }
+            console.log(`[prefetch] ${p.label}: ${dates.length} date(s) to load`);
+            const batches = planBatches(dates, allFiles, p.maxDates, p.maxFiles);
+            let done = 0;
+            for (const b of batches) {
+                const sql = `INSERT INTO t SELECT ${grain.select} FROM read_parquet([${b.files.map(f => `'${toHttps(f)}'`).join(', ')}]) f
+                             WHERE f.date IN (${b.dates.map(d => `DATE '${d}'`).join(', ')}) ${grain.group}`;
+                try { await pfq(sql); } catch (e) { try { await pfq(sql); } catch (e2) { console.warn('[prefetch] batch failed:', String(e2).slice(0, 120)); } }
+                done += b.dates.length;
+                if (!running) setStatus(`prefetching ${p.label} — ${Math.min(99, Math.round(done / dates.length * 100))}%`, 'connected');
+            }
+            try { await pfDb.dropFile('out.parquet'); } catch (e) {}
+            await pfq(`COPY t TO 'out.parquet' (FORMAT PARQUET)`);
+            const outBuf = await pfDb.copyFileToBuffer('out.parquet');
+            const st = (await pfq(`SELECT count(*) AS n, min(date)::varchar AS mn, max(date)::varchar AS mx FROM t`)).toArray()[0].toJSON();
+            if (await opfsWrite(cacheFile(key), outBuf)) {
+                localStorage.setItem(cacheMetaKey(key), JSON.stringify({
+                    from: st.mn, to: st.mx, rows: Number(st.n), grainKey: p.key,
+                    tableUuid: summaryInfo.uuid, snapshotId: summaryInfo.snapshot, savedAt: Date.now(),
+                }));
+                // make the interactive side reload this grain from the richer cache
+                const live = gs(grain);
+                live.exists = false; live.snapshotId = null;
+                if (loadedWindow && loadedWindow.grainKey === p.key) loadedWindow = null;
+            }
+            console.log(`[prefetch] ${p.label}: done — ${Number(st.n).toLocaleString()} rows cached (${st.mn}..${st.mx})`);
+        }
+        if (!running) setStatus('prefetch complete — every range is now local', 'connected');
+        if (!running) renderAll();   // reload the active grain from the new cache
+    } catch (e) {
+        console.warn('[prefetch] failed', e);
+    } finally {
+        try { if (pfConn) await pfConn.close(); } catch (e) {}
+        try { if (pfWorker) pfWorker.terminate(); } catch (e) {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Filter helpers (tw_<grain> w JOIN tdim d)
+// ---------------------------------------------------------------------------
+// The local tables hold coverage far beyond the view, so every render query
+// filters to the render window.
+function windowClause() {
+    return `w.date >= DATE '${loadedWindow.from}' AND w.date <= DATE '${loadedWindow.to}'`;
+}
+function whereScada() {
     const fuel = $('fuelFilter').value || xf.fuel;
-    const clauses = ['1=1'];
-    if (withDates === false) { /* twin already covers the range */ }
+    const clauses = [windowClause()];
     if (xf.region || $('regionFilter').value) clauses.push(`d.Region = '${esc($('regionFilter').value || xf.region)}'`);
     if (fuel) clauses.push(`d.fuel = '${esc(fuel)}'`);
     if (xf.duids.length) clauses.push(`w.DUID IN (${xf.duids.map(d => `'${esc(d)}'`).join(',')})`);
@@ -828,7 +929,7 @@ function whereScada(withDates = false) {
 }
 function wherePrice() {
     const region = $('regionFilter').value || xf.region;
-    const clauses = ['1=1'];
+    const clauses = [windowClause()];
     if (region) clauses.push(`d.Region = '${esc(region)}'`);
     else {
         const fuel = $('fuelFilter').value || xf.fuel;
@@ -902,7 +1003,7 @@ async function renderGeneration(seq, grain) {
     const seriesCol = drill ? 'w.DUID' : 'd.fuel';
     const rows = await q(`
         SELECT w.t, ${seriesCol} AS series, sum(${valCol})::DOUBLE AS v
-        FROM twin w JOIN tdim d ON w.DUID = d.DUID
+        FROM ${tw(grain)} w JOIN tdim d ON w.DUID = d.DUID
         WHERE ${whereScada()}
         GROUP BY 1, 2 ORDER BY 1`);
     if (seq !== _renderSeq) return;
@@ -987,20 +1088,20 @@ async function renderGeneration(seq, grain) {
     }
     const latest = (await q(`
         SELECT sum(w.mw)::DOUBLE AS mw, max(w.t) AS t
-        FROM twin w JOIN tdim d ON w.DUID = d.DUID
-        WHERE ${whereScada()} AND w.t = (SELECT max(t) FROM twin)`))[0];
+        FROM ${tw(grain)} w JOIN tdim d ON w.DUID = d.DUID
+        WHERE ${whereScada()} AND w.t = (SELECT max(t) FROM ${tw(grain)} w WHERE ${windowClause()})`))[0];
     if (seq === _renderSeq && latest && latest.mw != null) {
         $('kpiLatestMW').textContent = fmtInt(latest.mw);
         $('kpiLatestMWSub').textContent = `at ${fmtTs(latest.t, true).slice(-5)}`;
     }
-    const gens = (await q(`SELECT count(DISTINCT w.DUID)::INT AS n FROM twin w JOIN tdim d ON w.DUID = d.DUID WHERE ${whereScada()}`))[0];
+    const gens = (await q(`SELECT count(DISTINCT w.DUID)::INT AS n FROM ${tw(grain)} w JOIN tdim d ON w.DUID = d.DUID WHERE ${whereScada()}`))[0];
     if (seq === _renderSeq) $('kpiGens').textContent = fmtInt(num(gens.n));
 }
 
 async function renderPrice(seq, grain) {
     const rows = await q(`
         SELECT w.t, d.Region AS region, avg(w.price)::DOUBLE AS price
-        FROM twin w JOIN tdim d ON w.DUID = d.DUID
+        FROM ${tw(grain)} w JOIN tdim d ON w.DUID = d.DUID
         WHERE ${wherePrice()} AND w.price IS NOT NULL
         GROUP BY 1, 2 ORDER BY 1`);
     if (seq !== _renderSeq) return;
@@ -1047,7 +1148,7 @@ async function renderPrice(seq, grain) {
 }
 
 let mapRegistered = false;
-async function renderMap(seq) {
+async function renderMap(seq, grain) {
     if (!mapRegistered) {
         try {
             const geo = await (await fetch('https://raw.githubusercontent.com/rowanhogan/australian-states/master/states.geojson')).json();
@@ -1059,7 +1160,7 @@ async function renderMap(seq) {
         SELECT w.DUID, any_value(d.fuel) AS fuel, any_value(d.Region) AS region,
                any_value(d.latitude)::DOUBLE AS lat, any_value(d.longitude)::DOUBLE AS lon,
                avg(w.mw)::DOUBLE AS mw
-        FROM twin w JOIN tdim d ON w.DUID = d.DUID
+        FROM ${tw(grain)} w JOIN tdim d ON w.DUID = d.DUID
         WHERE ${whereScada()} AND d.latitude IS NOT NULL
         GROUP BY 1`);
     if (seq !== _renderSeq || !rows.length) return;
@@ -1123,9 +1224,9 @@ async function renderAll() {
         updateFilterTags();
         await renderGeneration(seq, grain);
         await renderPrice(seq, grain);
-        await renderMap(seq);
+        await renderMap(seq, grain);
         console.log('[t] rendered', Math.round(performance.now()));
-        const cutoff = (await q(`SELECT max(cutoff)::varchar AS c FROM twin`))[0];
+        const cutoff = (await q(`SELECT max(cutoff)::varchar AS c FROM ${tw(grain)} w WHERE ${windowClause()}`))[0];
         setStatus(`${fmtInt(loadedWindow.rows)} rows local · data to ${cutoff.c ? String(cutoff.c).slice(0, 16) : loadedWindow.to}${refreshAfter ? ' · refreshing…' : ''}`, refreshAfter ? 'loading' : 'connected');
     } catch (e) {
         console.error(e);
@@ -1245,7 +1346,7 @@ $('runsql').onclick = async () => {
     $('sqltable').replaceChildren();
     const t0 = performance.now();
     try {
-        await ensureAttach();
+        if (/onelake\./i.test($('sqlbox').value)) await ensureAttach();
         const rows = await q($('sqlbox').value);
         const cols = rows.length ? Object.keys(rows[0]) : [];
         renderTable($('sqltable'), cols, rows.slice(0, 500));
@@ -1260,7 +1361,7 @@ $('csvsql').onclick = async () => {
     info.className = 'analyze-info';
     info.textContent = 'exporting…';
     try {
-        await ensureAttach();
+        if (/onelake\./i.test($('sqlbox').value)) await ensureAttach();
         const exportConn = await db.connect();
         try {
             const reader = await exportConn.send($('sqlbox').value);
@@ -1335,9 +1436,10 @@ async function start(token) {
         const o = document.createElement('option'); o.value = r.fuel; o.textContent = r.fuel; $('fuelFilter').appendChild(o);
     }
 
-    $('sqlbox').value = `SELECT d.State, round(sum(f.mw)/12) AS mwh\nFROM onelake.mart.fct_summary f\nJOIN onelake.mart.dim_duid d ON f.DUID = d.DUID\nWHERE f.date >= DATE '${minusDays(end, 1)}'\nGROUP BY 1 ORDER BY 2 DESC;`;
+    $('sqlbox').value = `SELECT d.State, round(sum(w.mwh)) AS mwh\nFROM tw_hour w\nJOIN tdim d ON w.DUID = d.DUID\nWHERE w.date >= DATE '${minusDays(end, 1)}'\nGROUP BY 1 ORDER BY 2 DESC;`;
 
     await renderAll();
+    if (!window.__noPrefetch) setTimeout(() => prefetchAll().catch(e => console.warn('[prefetch]', e)), 4000);
 }
 
 $('signin').onclick = async () => {
@@ -1353,6 +1455,7 @@ $('signout').onclick = () => { sessionStorage.clear(); location.reload(); };
 
 // Hooks for automated end-to-end tests: bypass MSAL with a caller-supplied token.
 window.__dashboardStartWithToken = (token) => start(token);
+window.__prefetchNow = (histFrom) => prefetchAll(histFrom);
 window.__charts = charts;
 window.__dashboardReady = true;
 </script>
