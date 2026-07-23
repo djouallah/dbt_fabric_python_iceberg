@@ -640,8 +640,8 @@ async function snapshotFiles(snapshotId) {
 const overlaps = (f, from, to) => (f.dateMin == null || f.dateMin <= to) && (f.dateMax == null || f.dateMax >= from);
 function datesBetween(from, to) {
     const out = [];
-    for (let d = from; d <= to; d = minusDays(d, -1)) out.push(d);
-    return out;
+    for (let d = from; d <= to && out.length < 5000; d = minusDays(d, -1)) out.push(d);
+    return out;   // hard cap: nothing legitimate spans >13 years of dates
 }
 
 // Read the given dates from the given file set with plain read_parquet, in
@@ -1333,8 +1333,21 @@ $('duidSearch').addEventListener('input', e => renderDuidList(e.target.value));
 
 $('regionFilter').onchange = () => renderAll();
 $('fuelFilter').onchange = () => { xf.fuel = null; renderAll(); };
-$('dateFrom').onchange = () => { syncPresetHighlight(); renderAll(); };
-$('dateTo').onchange = () => { syncPresetHighlight(); renderAll(); };
+// Date inputs fire `change` per segment while typing (a half-typed year like
+// 0002 is a "valid" date) — debounce and ignore values that can't be real.
+const DATA_FLOOR = '2018-01-01';
+let dateDebounce = null;
+function onDateChange() {
+    clearTimeout(dateDebounce);
+    dateDebounce = setTimeout(() => {
+        const { from, to } = getRange();
+        if (!from || !to || from > to || from < DATA_FLOOR || to < DATA_FLOOR) return;
+        syncPresetHighlight();
+        renderAll();
+    }, 500);
+}
+$('dateFrom').onchange = onDateChange;
+$('dateTo').onchange = onDateChange;
 $('presets').addEventListener('click', e => {
     const b = e.target.closest('button[data-days]');
     if (!b) return;
@@ -1451,6 +1464,7 @@ async function start(token) {
     const end = brisbaneToday();
     $('dateTo').value = end;
     $('dateFrom').value = minusDays(end, 6);
+    for (const el of [$('dateFrom'), $('dateTo')]) { el.min = '2018-04-01'; el.max = end; }
     syncPresetHighlight();
 
     setStatus('Starting DuckDB-WASM…');
