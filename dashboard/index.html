@@ -404,7 +404,7 @@ async function cleanupLegacy() {
     try {
         const root = await navigator.storage.getDirectory();
         for await (const [name] of root.entries()) {
-            if (/^aemo_v[45]_/.test(name)) { try { await root.removeEntry(name); } catch (e) {} }
+            if (/^aemo_(v[45]_|cache_v5)/.test(name)) { try { await root.removeEntry(name); } catch (e) {} }
         }
     } catch (e) {}
     try { for (const k of Object.keys(localStorage)) if (/^aemo_(meta_v\d|v5_meta)/.test(k)) localStorage.removeItem(k); } catch (e) {}
