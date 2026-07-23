@@ -120,7 +120,6 @@ footer a { color: inherit; }
   </div>
   <div class="spacer"></div>
   <span class="pill" id="freshness" hidden>—</span>
-  <span class="pill" id="account" hidden>—</span>
   <button id="signout" hidden>Sign out</button>
 </header>
 
@@ -143,6 +142,7 @@ footer a { color: inherit; }
     </div>
     <select id="region" aria-label="Region"><option value="">All regions</option></select>
     <select id="fuel" aria-label="Fuel"><option value="">All fuels</option></select>
+    <button class="pill" id="duidchip" hidden title="Click to clear"></button>
     <button id="refresh" title="Re-run all queries">Refresh</button>
     <span id="status"></span>
   </div>
@@ -163,14 +163,14 @@ footer a { color: inherit; }
 
   <div class="card" id="card-price">
     <h3>Price by region</h3>
-    <div class="desc">Volume-weighted regional reference price, $/MWh</div>
+    <div class="desc">Volume-weighted regional reference price, $/MWh · click a region to cross-filter</div>
     <div class="chart" id="chart-price"></div>
     <details class="data"><summary>Data table</summary><div class="tablewrap" id="table-price"></div></details>
   </div>
 
   <div class="card" id="card-top">
     <h3>Top generators</h3>
-    <div class="desc">Total energy over the selected range, MWh</div>
+    <div class="desc">Total energy over the selected range, MWh · click a bar to focus one generator</div>
     <div class="chart" id="chart-top" style="height:380px"></div>
     <details class="data"><summary>Data table</summary><div class="tablewrap" id="table-top"></div></details>
   </div>
@@ -357,7 +357,7 @@ async function refreshTokenLoop() {
 // ---------------------------------------------------------------------------
 // State & helpers
 // ---------------------------------------------------------------------------
-const state = { days: 7, region: '', fuel: '', latest: null };
+const state = { days: 7, region: '', fuel: '', duid: '' };
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/'/g, "''");
 const num = v => v == null ? null : Number(v);
@@ -435,7 +435,30 @@ function localWhere() {
     const c = ['1=1'];
     if (state.region) c.push(`d.Region = '${esc(state.region)}'`);
     if (state.fuel) c.push(`d.fuel = '${esc(state.fuel)}'`);
+    if (state.duid) c.push(`w.DUID = '${esc(state.duid)}'`);
     return c.join(' AND ');
+}
+
+// --- cross-filtering: clicking a mark filters every other chart (toggle to clear) ---
+function toggleFuel(f) {
+    if (!f || f === 'Other') return;
+    state.fuel = state.fuel === f ? '' : f;
+    $('fuel').value = state.fuel;
+    runAll();
+}
+function toggleRegion(r) {
+    if (!r) return;
+    state.region = state.region === r ? '' : r;
+    $('region').value = state.region;
+    runAll();
+}
+function toggleDuid(d) {
+    if (!d) return;
+    state.duid = state.duid === d ? '' : d;
+    const chip = $('duidchip');
+    chip.hidden = !state.duid;
+    chip.textContent = state.duid ? `DUID: ${state.duid} ✕` : '';
+    runAll();
 }
 
 // ---------------------------------------------------------------------------
@@ -512,9 +535,10 @@ function renderGen(rows, bucket) {
         grid: { left: 56, right: 16, top: 34, bottom: 28 },
         xAxis: baseAxis(bucket.withTime), yAxis: baseYAxis('MW'),
         tooltip: baseTooltip(bucket.withTime, 'MW'),
+        dataZoom: [{ type: 'inside' }],
         series,
     }, true);
-    $('gen-desc').textContent = `Mean output per ${bucket.label.replace(' average', '')}, MW`;
+    $('gen-desc').textContent = `Mean output per ${bucket.label.replace(' average', '')}, MW · click a fuel to cross-filter · drag or scroll to zoom`;
     tableFrom('table-gen', ['interval', 'fuel', 'MW'], rows.map(r => [fmtTs(Number(r.t), bucket.withTime), r.fuel, fmtInt(r.mw)]));
 }
 
@@ -539,6 +563,7 @@ function renderPrice(rows, bucket) {
         grid: { left: 56, right: 16, top: 34, bottom: 28 },
         xAxis: baseAxis(bucket.withTime), yAxis: baseYAxis('$/MWh'),
         tooltip: baseTooltip(bucket.withTime, '$'),
+        dataZoom: [{ type: 'inside' }],
         series,
     }, true);
     tableFrom('table-price', ['interval', 'region', '$/MWh'], rows.map(r => [fmtTs(Number(r.t), bucket.withTime), r.Region, fmtInt(r.price)]));
@@ -693,10 +718,16 @@ async function runAll() {
 async function start(token) {
     $('hero').hidden = true;
     $('app').hidden = false;
-    if (account) { $('account').hidden = false; $('account').textContent = account.username; $('signout').hidden = false; }
+    $('signout').hidden = false;
     charts.gen = echarts.init($('chart-gen'), null, { renderer: 'svg' });
     charts.price = echarts.init($('chart-price'), null, { renderer: 'svg' });
     charts.top = echarts.init($('chart-top'), null, { renderer: 'svg' });
+    // synced crosshair + zoom across the two time charts
+    charts.gen.group = charts.price.group = 'time';
+    echarts.connect('time');
+    charts.gen.on('click', p => toggleFuel(p.seriesName));
+    charts.price.on('click', p => toggleRegion(p.seriesName));
+    charts.top.on('click', p => toggleDuid(p.name));
     addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (loadedWindow) runAll(); });
     $('status').textContent = 'starting DuckDB…';
@@ -719,6 +750,7 @@ $('signout').onclick = () => { sessionStorage.clear(); location.reload(); };
 $('refresh').onclick = () => { loadedWindow = null; runAll(); };
 $('region').onchange = e => { state.region = e.target.value; runAll(); };
 $('fuel').onchange = e => { state.fuel = e.target.value; runAll(); };
+$('duidchip').onclick = () => toggleDuid(state.duid);
 $('rangeseg').addEventListener('click', e => {
     const b = e.target.closest('button[data-days]');
     if (!b) return;
