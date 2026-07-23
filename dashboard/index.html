@@ -227,7 +227,7 @@ footer a { color: inherit; }
 <div id="view-analyze" hidden>
   <div class="analyze-wrap">
     <div class="analyze-head">
-      <label>SQL <span>— all local: fct_summary / dim_duid (raw, full history) · tw_5min / tw_hour / tw_day · tdim</span></label>
+      <label>SQL <span>— all local: fct_summary / fct_summary_daily / dim_duid (raw, full history) · tw_5min / tw_hour / tw_day · tdim</span></label>
       <button class="plain" id="runsql">Run</button>
       <button class="plain primary" id="csvsql">Download CSV</button>
     </div>
@@ -504,10 +504,11 @@ async function wipeTable(tbl) {
 
 // loadedWindow is only the RENDER window { grainKey, from, to, rows }. Grain
 // tables tw_<grain> are TEMP aggregations rebuilt from the fct_summary view;
-// gcov tracks the date span each currently holds. tw_day is built over the full
-// cached span (so any year/sub-range reuses it); finer grains hold their window.
+// gcov tracks the date span (and source) each currently holds. tw_day is built
+// over its full cached span (so any year/sub-range reuses it) from the daily
+// mart when present; finer grains hold their raw-rollup window.
 let loadedWindow = null;
-const gcov = {};                 // grain.key -> { from, to } (span the tw_<grain> table holds)
+const gcov = {};                 // grain.key -> { from, to, src } (span + source the tw_<grain> table holds)
 const tw = g => `tw_${g.key}`;
 function resetGrains() { for (const k in gcov) delete gcov[k]; loadedWindow = null; }
 
@@ -713,26 +714,45 @@ function getRange() { return { from: $('dateFrom').value, to: $('dateTo').value 
 async function ensureGrain(from, to) {
     const grain = grainFor(spanDays(from, to));
     if (!cacheMeta.fct_summary || !cacheMeta.fct_summary.files.length) throw new Error('no data cached yet — import from OneLake first');
-    // Build span: full cached history for `day` (built once, reused for any
-    // sub-range), the selected window for finer grains. min/max reads parquet
-    // stats only — no data scan.
-    let bFrom = from, bTo = to;
-    if (grain.key === 'day') {
-        const s = (await q(`SELECT strftime(min(f.date), '%Y-%m-%d') AS lo, strftime(max(f.date), '%Y-%m-%d') AS hi FROM fct_summary f`))[0];
+
+    // The day grain reads the pre-aggregated fct_summary_daily mart when it's
+    // cached — a tiny (date, DUID) table, so a year view is a cheap projection,
+    // not a tens-of-millions-row 5-min rollup. Absent the mart (not yet synced,
+    // or not deployed) it falls back to rolling up the raw fct_summary. Either
+    // source is built ONCE over its full span (min/max reads parquet stats only,
+    // no data scan) and window-filtered at render, so switching years is
+    // instant. Finer grains always roll up their (small) window of raw 5-min.
+    const useDaily = grain.key === 'day' && cacheMeta.fct_summary_daily && cacheMeta.fct_summary_daily.files.length;
+    const src = useDaily ? 'daily' : (grain.key === 'day' ? 'day-raw' : grain.key);
+
+    let bFrom = from, bTo = to, buildSql;
+    if (useDaily) {
+        const s = (await q(`SELECT strftime(min(date), '%Y-%m-%d') AS lo, strftime(max(date), '%Y-%m-%d') AS hi FROM fct_summary_daily`))[0];
         if (s && s.lo && s.hi) { bFrom = s.lo; bTo = s.hi; }
+        buildSql = `CREATE OR REPLACE TEMP TABLE ${tw(grain)} AS
+                    SELECT epoch_ms(date::TIMESTAMP) AS t, date, DUID,
+                           mw::DOUBLE AS mw, mwh::DOUBLE AS mwh, price::DOUBLE AS price, cutoff
+                    FROM fct_summary_daily
+                    WHERE date BETWEEN DATE '${bFrom}' AND DATE '${bTo}'`;
+    } else {
+        if (grain.key === 'day') {
+            const s = (await q(`SELECT strftime(min(f.date), '%Y-%m-%d') AS lo, strftime(max(f.date), '%Y-%m-%d') AS hi FROM fct_summary f`))[0];
+            if (s && s.lo && s.hi) { bFrom = s.lo; bTo = s.hi; }
+        }
+        buildSql = `CREATE OR REPLACE TEMP TABLE ${tw(grain)} AS
+                    SELECT ${grain.select} FROM fct_summary f
+                    WHERE f.date BETWEEN DATE '${bFrom}' AND DATE '${bTo}' ${grain.group}`;
     }
+
     // Row count scoped to the RENDER window (the built table may span more).
     const windowRows = async () => num((await q(`SELECT count(*) AS n FROM ${tw(grain)} WHERE date BETWEEN DATE '${from}' AND DATE '${to}'`))[0].n);
     const cov = gcov[grain.key];
-    if (cov && cov.from <= bFrom && cov.to >= bTo) {
+    if (cov && cov.src === src && cov.from <= bFrom && cov.to >= bTo) {
         loadedWindow = { grainKey: grain.key, from, to, rows: await windowRows() };
         return;
     }
-    const sql = `CREATE OR REPLACE TEMP TABLE ${tw(grain)} AS
-                 SELECT ${grain.select} FROM fct_summary f
-                 WHERE f.date BETWEEN DATE '${bFrom}' AND DATE '${bTo}' ${grain.group}`;
-    try { await q(sql); } catch (e) { await q(sql); }   // retry once — first scan after a (re)build can flake
-    gcov[grain.key] = { from: bFrom, to: bTo };
+    try { await q(buildSql); } catch (e) { await q(buildSql); }   // retry once — first scan after a (re)build can flake
+    gcov[grain.key] = { from: bFrom, to: bTo, src };
     loadedWindow = { grainKey: grain.key, from, to, rows: await windowRows() };
 }
 
@@ -750,6 +770,14 @@ async function populateFilters() {
     for (const r of await q(`SELECT DISTINCT fuel FROM tdim ORDER BY 1`)) { const o = document.createElement('option'); o.value = r.fuel; o.textContent = r.fuel; ff.appendChild(o); }
 }
 
+// The daily rollup mart is small and optional: if it isn't deployed/reachable
+// yet, the day grain falls back to rolling up raw fct_summary, so a failure here
+// must never abort a sync. Returns 'unchanged' on any error.
+async function syncDailyMart(onProgress) {
+    try { return await syncTable('fct_summary_daily', { onProgress }); }
+    catch (e) { console.warn('fct_summary_daily unavailable — day grain uses raw rollup:', String(e && e.message || e).slice(0, 120)); return 'unchanged'; }
+}
+
 // Shared change-capture pass (boot background check + Refresh button). Guarded
 // so the two can't overlap. Returns null when a sync is already running.
 let syncing = false;
@@ -759,11 +787,12 @@ async function syncAll(onProgress) {
     try {
         return await withSyncLock(async () => {
             const f = await syncTable('fct_summary', { onProgress });
+            const fd = await syncDailyMart(onProgress);   // tiny; non-fatal if absent
             const d = await syncTable('dim_duid', { onProgress });
             if (d !== 'unchanged') { await buildTdim(); await populateFilters(); }
-            const changed = f !== 'unchanged' || d !== 'unchanged';
+            const changed = f !== 'unchanged' || fd !== 'unchanged' || d !== 'unchanged';
             if (changed) resetGrains();
-            return { f, d, changed };
+            return { f, fd, d, changed };
         });
     } finally { syncing = false; }
 }
@@ -1306,6 +1335,9 @@ async function start(token) {
     await populateFilters();
 
     const { from, to } = getRange();
+    // Restore the small daily mart if it was cached — lets a year (day-grain)
+    // view render straight from it. The background syncAll below refreshes it.
+    await restoreTable('fct_summary_daily');
     if (await restoreTable('fct_summary')) {
         // Warm cache: render instantly from the local DB, then check OneLake in
         // the background and re-render only if a new snapshot changed the files.
@@ -1333,6 +1365,12 @@ async function start(token) {
         });
         resetGrains();
         await renderAll();
+        // Pull the tiny daily mart in the background so a later year (day-grain)
+        // view is instant. Non-fatal: the day grain works off raw until it lands.
+        (async () => {
+            try { await withSyncLock(() => syncDailyMart((d, t) => { if (!running) setStatus(`daily rollup ${d}/${t}…`, 'loading'); })); }
+            catch (e) { console.warn('daily mart background fetch failed', String(e && e.message || e).slice(0, 120)); }
+        })();
     }
 }
 

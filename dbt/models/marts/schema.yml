@@ -128,3 +128,36 @@ models:
                 tags: [heavy]
       - name: cutoff
         description: High-water mark (max SETTLEMENTDATE seen when the batch was written) used by the intraday top-up branch
+
+  - name: fct_summary_daily
+    description: >
+      Daily rollup of fct_summary at (date, DUID) grain — one row per unit per
+      day. Backs the dashboard's day-grain (year / multi-month) views so a year
+      is served from ~365×#DUIDs rows instead of rolling up the raw 5-min data.
+      The still-filling current day is excluded (see the model header).
+    columns:
+      - name: date
+        description: Calendar date
+        tests:
+          - not_null:
+              config:
+                tags: [heavy]
+      - name: DUID
+        description: Dispatchable Unit Identifier of the generating unit
+        tests:
+          - not_null:
+              config:
+                tags: [heavy]
+          - relationships:
+              to: ref('dim_duid')
+              field: DUID
+              config:
+                tags: [heavy]
+      - name: mw
+        description: Mean unit output across the day (MW)
+      - name: mwh
+        description: Daily energy for the unit (MWh) — sum of 5-min mw / 12
+      - name: price
+        description: Mean regional price seen by the unit across the day ($/MWh)
+      - name: cutoff
+        description: Max cutoff high-water mark carried through from fct_summary
