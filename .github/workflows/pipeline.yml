@@ -6,6 +6,7 @@ on:
     paths:
       - "dbt/**"
       - "fabric_items/**"
+      - "dashboard/**"
       - "deploy.py"
       - ".github/workflows/pipeline.yml"
   # No schedule here — hourly data refreshes live in data.yml (lakehouse check + dbt build
@@ -179,11 +180,20 @@ jobs:
           fi
           echo "T_DEPLOY=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
 
+      - name: 🧩 Stage Pages site (dashboard at root, dbt docs at /dag)
+        if: ${{ always() && steps.docs.outcome == 'success' }}
+        # The dashboard is fully static — it reads the Iceberg tables live from OneLake in the
+        # browser (MSAL sign-in + DuckDB-WASM), so no data files are exported here.
+        run: |
+          mkdir -p /tmp/site/dag
+          cp dashboard/index.html /tmp/site/
+          cp -r dbt/target/* /tmp/site/dag/
+
       - name: 📤 Upload Pages artifact
         if: ${{ always() && steps.docs.outcome == 'success' }}
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dbt/target
+          path: /tmp/site
 
       - name: 📝 Build dashboard summary
         if: always()

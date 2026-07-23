@@ -1,0 +1,746 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AEMO Live — OneLake Iceberg</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
+<style>
+:root {
+  color-scheme: light;
+  --page:      #f9f9f7;
+  --surface:   #fcfcfb;
+  --ink:       #0b0b0b;
+  --ink-2:     #52514e;
+  --muted:     #898781;
+  --grid:      #e1e0d9;
+  --baseline:  #c3c2b7;
+  --border:    rgba(11,11,11,0.10);
+  --accent:    #2a78d6;
+  --s1:#2a78d6; --s2:#008300; --s3:#e87ba4; --s4:#eda100;
+  --s5:#1baf7a; --s6:#eb6834; --s7:#4a3aa7; --s8:#e34948;
+  --other:#898781;
+  --critical:#d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page:      #0d0d0d;
+    --surface:   #1a1a19;
+    --ink:       #ffffff;
+    --ink-2:     #c3c2b7;
+    --muted:     #898781;
+    --grid:      #2c2c2a;
+    --baseline:  #383835;
+    --border:    rgba(255,255,255,0.10);
+    --accent:    #3987e5;
+    --s1:#3987e5; --s2:#008300; --s3:#d55181; --s4:#c98500;
+    --s5:#199e70; --s6:#d95926; --s7:#9085e9; --s8:#e66767;
+    --critical:#d03b3b;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--page); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+header {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 14px 22px; border-bottom: 1px solid var(--border);
+}
+header h1 { font-size: 17px; font-weight: 650; margin: 0; }
+header .sub { color: var(--muted); font-size: 12.5px; }
+.spacer { flex: 1; }
+.pill {
+  font-size: 12.5px; color: var(--ink-2); border: 1px solid var(--border);
+  border-radius: 999px; padding: 4px 12px; background: var(--surface);
+}
+button {
+  font: inherit; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 14px; cursor: pointer;
+}
+button.primary { background: var(--accent); border-color: transparent; color: #fff; font-weight: 600; }
+button:disabled { opacity: .5; cursor: default; }
+#hero {
+  max-width: 460px; margin: 12vh auto; padding: 30px 34px; text-align: center;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+}
+#hero h2 { margin: 0 0 6px; font-size: 18px; }
+#hero p { color: var(--ink-2); margin: 8px 0 20px; }
+#hero .err { color: var(--critical); font-size: 12.5px; margin-top: 14px; white-space: pre-wrap; }
+main { padding: 16px 22px 40px; max-width: 1280px; margin: 0 auto; }
+.filters {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px;
+}
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.seg button { border: 0; border-radius: 0; padding: 6px 12px; color: var(--ink-2); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: #fff; font-weight: 600; }
+select {
+  font: inherit; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
+}
+#status { color: var(--muted); font-size: 12.5px; margin-left: auto; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 14px; }
+.tile {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px;
+}
+.tile .label { color: var(--ink-2); font-size: 12.5px; }
+.tile .value { font-size: 26px; font-weight: 650; margin-top: 2px; }
+.tile .unit { color: var(--muted); font-size: 12.5px; font-weight: 400; margin-left: 4px; }
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 14px 16px 8px; margin-bottom: 14px;
+}
+.card h3 { margin: 0 0 2px; font-size: 14.5px; font-weight: 650; }
+.card .desc { color: var(--muted); font-size: 12.5px; margin-bottom: 6px; }
+.chart { width: 100%; height: 340px; }
+.loading .chart, .loading .value { opacity: .45; transition: opacity .2s; }
+details.data { margin: 4px 0 8px; }
+details.data summary { color: var(--muted); font-size: 12.5px; cursor: pointer; }
+.tablewrap { overflow-x: auto; max-height: 320px; overflow-y: auto; margin-top: 8px; }
+table { border-collapse: collapse; font-size: 12.5px; width: 100%; }
+th, td { text-align: right; padding: 4px 10px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--ink-2); font-weight: 600; position: sticky; top: 0; background: var(--surface); }
+textarea {
+  width: 100%; min-height: 90px; font: 12.5px/1.5 ui-monospace, Consolas, monospace;
+  color: var(--ink); background: var(--page); border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+}
+.sqlerr { color: var(--critical); font-size: 12.5px; white-space: pre-wrap; }
+footer { color: var(--muted); font-size: 12px; padding: 0 22px 30px; max-width: 1280px; margin: 0 auto; }
+footer a { color: inherit; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>AEMO Live</h1>
+    <div class="sub">Australian electricity market · Iceberg tables on OneLake, queried in your browser</div>
+  </div>
+  <div class="spacer"></div>
+  <span class="pill" id="freshness" hidden>—</span>
+  <span class="pill" id="account" hidden>—</span>
+  <button id="signout" hidden>Sign out</button>
+</header>
+
+<div id="hero">
+  <h2>Sign in to query OneLake</h2>
+  <p>This dashboard attaches the OneLake Iceberg REST catalog with DuckDB-WASM and runs every
+     query in your browser — no backend, no extracts. You need read access to the Fabric workspace.</p>
+  <button class="primary" id="signin">Sign in with Microsoft</button>
+  <div class="err" id="heroerr"></div>
+</div>
+
+<main id="app" hidden>
+  <div class="filters">
+    <div class="seg" id="rangeseg" role="group" aria-label="Date range">
+      <button data-days="1" aria-pressed="false">Today</button>
+      <button data-days="3" aria-pressed="false">3D</button>
+      <button data-days="7" aria-pressed="true">7D</button>
+      <button data-days="30" aria-pressed="false">30D</button>
+      <button data-days="90" aria-pressed="false">90D</button>
+    </div>
+    <select id="region" aria-label="Region"><option value="">All regions</option></select>
+    <select id="fuel" aria-label="Fuel"><option value="">All fuels</option></select>
+    <button id="refresh" title="Re-run all queries">Refresh</button>
+    <span id="status"></span>
+  </div>
+
+  <div class="kpis">
+    <div class="tile"><div class="label">Total generation</div><div class="value" id="kpi-mwh">—</div></div>
+    <div class="tile"><div class="label">Average price</div><div class="value" id="kpi-price">—</div></div>
+    <div class="tile"><div class="label">Active generators</div><div class="value" id="kpi-gens">—</div></div>
+    <div class="tile"><div class="label">Latest interval</div><div class="value" id="kpi-cutoff" style="font-size:19px">—</div></div>
+  </div>
+
+  <div class="card" id="card-gen">
+    <h3>Generation by fuel</h3>
+    <div class="desc" id="gen-desc"></div>
+    <div class="chart" id="chart-gen"></div>
+    <details class="data"><summary>Data table</summary><div class="tablewrap" id="table-gen"></div></details>
+  </div>
+
+  <div class="card" id="card-price">
+    <h3>Price by region</h3>
+    <div class="desc">Volume-weighted regional reference price, $/MWh</div>
+    <div class="chart" id="chart-price"></div>
+    <details class="data"><summary>Data table</summary><div class="tablewrap" id="table-price"></div></details>
+  </div>
+
+  <div class="card" id="card-top">
+    <h3>Top generators</h3>
+    <div class="desc">Total energy over the selected range, MWh</div>
+    <div class="chart" id="chart-top" style="height:380px"></div>
+    <details class="data"><summary>Data table</summary><div class="tablewrap" id="table-top"></div></details>
+  </div>
+
+  <div class="card">
+    <h3>Analyze</h3>
+    <div class="desc">Query the attached catalog directly — <code>onelake.mart.fct_summary</code>, <code>onelake.mart.dim_duid</code>, <code>onelake.mart.dim_calendar</code></div>
+    <textarea id="sqlbox" spellcheck="false"></textarea>
+    <div style="margin:8px 0"><button class="primary" id="runsql">Run</button></div>
+    <div class="sqlerr" id="sqlerrbox"></div>
+    <div class="tablewrap" id="table-sql"></div>
+  </div>
+</main>
+
+<footer>
+  Data © AEMO · Iceberg REST catalog on OneLake read live by DuckDB-WASM ·
+  <a href="dag/" target="_blank">dbt docs</a> ·
+  <a href="https://github.com/djouallah/dbt_fabric_python_iceberg" target="_blank">source</a>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+<script type="module">
+import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.33.1-dev57.0/+esm";
+import * as msal from "https://cdn.jsdelivr.net/npm/@azure/msal-browser@3/+esm";
+const echarts = window.echarts;
+
+const WORKSPACE = "ea575278-bd81-459c-9680-47829898c902";
+const LAKEHOUSE = "50d4826c-7ad8-4903-951c-602e2e599990";
+const ENDPOINT  = "https://onelake.table.fabric.microsoft.com/iceberg";
+const TENANT    = "4a86d5bb-4173-45ee-bfd5-a3b56ee2d3d5";
+const CLIENT_ID = "ef92c4a2-83b1-4216-b626-286f21c2c5da";
+const SCOPES    = ["https://storage.azure.com/user_impersonation"];
+
+// ---------------------------------------------------------------------------
+// Worker network bridge. The azure extension has no WASM build, so abfss://
+// paths coming back from the catalog would fail. OneLake serves the identical
+// bytes over https, and `abfss://{ws}@host/` and `https://host/{ws}/` are the
+// same byte length, so responses (JSON and avro alike) can be rewritten in
+// place. The bridge also injects the Entra bearer token on OneLake requests.
+// Runs inside the DuckDB worker, installed before importScripts.
+// ---------------------------------------------------------------------------
+function workerPatch(WS, token) {
+    let TOKEN = token;
+    const ABFSS = 'abfss://' + WS + '@onelake.dfs.fabric.microsoft.com/';
+    const HTTPS = 'https://onelake.dfs.fabric.microsoft.com/' + WS + '/';
+    const isOL = u => typeof u === 'string' && (u.indexOf('onelake.dfs.fabric.microsoft.com') !== -1 || u.indexOf('onelake.table.fabric.microsoft.com') !== -1);
+    const enc = new TextEncoder();
+    const A = enc.encode(ABFSS), H = enc.encode(HTTPS);
+    const rewriteBuf = (buf) => {
+        const u = new Uint8Array(buf), m = A.length;
+        let i = 0;
+        while (true) {
+            i = u.indexOf(A[0], i);
+            if (i === -1 || i + m > u.length) break;
+            let k = 1;
+            while (k < m && u[i + k] === A[k]) k++;
+            if (k === m) { u.set(H, i); i += m; } else i++;
+        }
+        return buf;
+    };
+    const rewriteStr = s => s.split(ABFSS).join(HTTPS);
+    const Real = self.XMLHttpRequest;
+    self.XMLHttpRequest = class extends Real {
+        open(method, url, ...rest) {
+            this.__ol = isOL(String(url));
+            this.__hasAuth = false;
+            return rest.length ? super.open(method, url, ...rest) : super.open(method, url);
+        }
+        setRequestHeader(k, v) {
+            if (String(k).toLowerCase() === 'authorization') this.__hasAuth = true;
+            return super.setRequestHeader(k, v);
+        }
+        send(body) {
+            if (this.__ol && !this.__hasAuth) { try { super.setRequestHeader('Authorization', 'Bearer ' + TOKEN); } catch (e) {} }
+            return super.send(body);
+        }
+        get response() {
+            const r = super.response;
+            if (!this.__ol || this.readyState !== 4 || r == null) return r;
+            if (this.__patched === undefined) {
+                if (typeof r === 'string') this.__patched = rewriteStr(r);
+                else if (r instanceof ArrayBuffer) this.__patched = rewriteBuf(r.slice(0));
+                else this.__patched = r;
+            }
+            return this.__patched;
+        }
+        get responseText() {
+            try {
+                const t = super.responseText;
+                return this.__ol && t ? rewriteStr(t) : t;
+            } catch (e) { return super.responseText; }
+        }
+    };
+    const ofetch = self.fetch.bind(self);
+    self.fetch = async (input, init) => {
+        const url = typeof input === 'string' ? input : (input && input.url);
+        if (!isOL(url)) return ofetch(input, init);
+        init = Object.assign({}, init || {});
+        const headers = new Headers(init.headers || (typeof input !== 'string' && input.headers) || undefined);
+        if (!headers.has('Authorization')) headers.set('Authorization', 'Bearer ' + TOKEN);
+        init.headers = headers;
+        const res = await ofetch(url, init);
+        const buf = await res.arrayBuffer();
+        return new Response(rewriteBuf(buf), { status: res.status, statusText: res.statusText, headers: res.headers });
+    };
+    self.addEventListener('message', (e) => {
+        if (e && e.data && e.data.__olToken) { TOKEN = e.data.__olToken; e.stopImmediatePropagation(); }
+    }, true);
+}
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+const pca = new msal.PublicClientApplication({
+    auth: { clientId: CLIENT_ID, authority: `https://login.microsoftonline.com/${TENANT}`, redirectUri: location.origin + location.pathname },
+    cache: { cacheLocation: 'sessionStorage' },
+});
+let account = null;
+
+async function getToken(interactive) {
+    if (interactive) {
+        const res = await pca.loginPopup({ scopes: SCOPES });
+        account = res.account;
+        return res.accessToken;
+    }
+    const res = await pca.acquireTokenSilent({ scopes: SCOPES, account });
+    return res.accessToken;
+}
+
+// ---------------------------------------------------------------------------
+// DuckDB
+// ---------------------------------------------------------------------------
+let db = null, conn = null, worker = null, currentToken = null;
+
+async function initDuck(token) {
+    currentToken = token;
+    const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
+    const patch = `(${workerPatch.toString()})(${JSON.stringify(WORKSPACE)}, ${JSON.stringify(token)});\n`;
+    const workerUrl = URL.createObjectURL(new Blob([patch, `importScripts("${bundle.mainWorker}");`], { type: 'text/javascript' }));
+    worker = new Worker(workerUrl);
+    db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker);
+    await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+    conn = await db.connect();
+    await q(`LOAD iceberg`);
+    await q(`CREATE OR REPLACE SECRET onelake (TYPE ICEBERG, TOKEN '${token}', ENDPOINT '${ENDPOINT}')`);
+    await q(`ATTACH '${WORKSPACE}/${LAKEHOUSE}' AS onelake (TYPE ICEBERG, ENDPOINT '${ENDPOINT}', ACCESS_DELEGATION_MODE 'none')`);
+    // The first scan after ATTACH can trap inside duckdb-wasm ("null function",
+    // occasionally a phantom binder error) — a zero-match probe absorbs it cheaply.
+    try { await q(`SELECT count(*) FROM onelake.mart.fct_summary WHERE date = DATE '1900-01-01'`); } catch (e) { console.warn('warmup', e); }
+}
+
+async function q(sql) {
+    try {
+        const t = await conn.query(sql);
+        return t.toArray().map(r => r.toJSON());
+    } catch (e) {
+        throw new Error(String(e && e.message || e).slice(0, 300) + ' | SQL: ' + sql.replace(/\s+/g, ' ').trim().slice(0, 200));
+    }
+}
+
+// Remote (catalog-touching) query with one retry: the first Iceberg scan after
+// ATTACH can fail spuriously in duckdb-wasm; an identical retry succeeds.
+async function rq(sql) {
+    try { return await q(sql); }
+    catch (e) {
+        if (/null function|No function matches/.test(String(e))) return await q(sql);
+        throw e;
+    }
+}
+
+async function refreshTokenLoop() {
+    try {
+        const tok = await getToken(false);
+        if (tok && tok !== currentToken) {
+            currentToken = tok;
+            worker.postMessage({ __olToken: tok });
+            await q(`CREATE OR REPLACE SECRET onelake (TYPE ICEBERG, TOKEN '${tok}', ENDPOINT '${ENDPOINT}')`);
+        }
+    } catch (e) { console.warn('token refresh failed', e); }
+}
+
+// ---------------------------------------------------------------------------
+// State & helpers
+// ---------------------------------------------------------------------------
+const state = { days: 7, region: '', fuel: '', latest: null };
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/'/g, "''");
+const num = v => v == null ? null : Number(v);
+const fmtCompact = v => v == null ? '—' : Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(v);
+const fmtInt = v => v == null ? '—' : Intl.NumberFormat('en').format(Math.round(v));
+const pad = n => String(n).padStart(2, '0');
+const fmtTs = (ms, withTime) => {
+    const d = new Date(Number(ms));
+    const day = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+    return withTime ? `${day} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}` : day;
+};
+
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const SLOTS = () => [css('--s1'), css('--s2'), css('--s3'), css('--s4'), css('--s5'), css('--s6'), css('--s7')];
+
+// Stable identity: fuel -> color slot, fixed once per session (never re-ranked by filters).
+let fuelSlots = new Map();   // fuel name -> hex
+let fuelOrder = [];          // stack order, fixed
+
+// AEMO settlement dates are Australian Eastern time.
+const brisbaneToday = () => new Date(Date.now() + 10 * 3600 * 1000).toISOString().slice(0, 10);
+const minusDays = (iso, n) => {
+    const d = new Date(iso + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() - n);
+    return d.toISOString().slice(0, 10);
+};
+
+// One remote scan per range builds a local temp table `twin`; every chart,
+// KPI, and filter change is then answered locally without touching OneLake.
+// mw = mean output over the bucket (charts); mwh = exact energy (KPIs, totals).
+function grainFor(days) {
+    if (days <= 3) return {
+        key: '5min', label: '5-minute intervals', withTime: true,
+        select: `epoch_ms(f.date::TIMESTAMP + ((f.time // 100) * 60 + (f.time % 100)) * INTERVAL 1 MINUTE) AS t,
+                 f.date, f.DUID, f.mw::DOUBLE AS mw, (f.mw / 12)::DOUBLE AS mwh, f.price::DOUBLE AS price, f.cutoff`,
+        group: '',
+    };
+    if (days <= 31) return {
+        key: 'hour', label: 'hourly average', withTime: true,
+        select: `epoch_ms(f.date::TIMESTAMP + (f.time // 100) * INTERVAL 1 HOUR) AS t,
+                 f.date, f.DUID, avg(f.mw)::DOUBLE AS mw, (sum(f.mw) / 12)::DOUBLE AS mwh, avg(f.price)::DOUBLE AS price, max(f.cutoff) AS cutoff`,
+        group: 'GROUP BY 1, 2, 3',
+    };
+    return {
+        key: 'day', label: 'daily average', withTime: false,
+        select: `epoch_ms(f.date::TIMESTAMP) AS t,
+                 f.date, f.DUID, avg(f.mw)::DOUBLE AS mw, (sum(f.mw) / 12)::DOUBLE AS mwh, avg(f.price)::DOUBLE AS price, max(f.cutoff) AS cutoff`,
+        group: 'GROUP BY 1, 2, 3',
+    };
+}
+
+let loadedWindow = null;  // {days, start, end, grain} of the current twin
+async function buildWindow() {
+    const grain = grainFor(state.days);
+    const end = brisbaneToday();
+    let start = minusDays(end, state.days - 1);
+    const build = (s) => rq(`
+        CREATE OR REPLACE TEMP TABLE twin AS
+        SELECT ${grain.select}
+        FROM onelake.mart.fct_summary f
+        WHERE f.date >= DATE '${s}' AND f.date <= DATE '${end}'
+        ${grain.group}`);
+    await build(start);
+    let n = num((await q(`SELECT count(*) AS n FROM twin`))[0].n);
+    if (!n) {           // pipeline may be behind — widen once before giving up
+        start = minusDays(start, 3);
+        await build(start);
+        n = num((await q(`SELECT count(*) AS n FROM twin`))[0].n);
+    }
+    loadedWindow = { days: state.days, start, end, grain, rows: n };
+    return n;
+}
+
+function localWhere() {
+    const c = ['1=1'];
+    if (state.region) c.push(`d.Region = '${esc(state.region)}'`);
+    if (state.fuel) c.push(`d.fuel = '${esc(state.fuel)}'`);
+    return c.join(' AND ');
+}
+
+// ---------------------------------------------------------------------------
+// Charts
+// ---------------------------------------------------------------------------
+const charts = {};
+function baseAxis(withTime) {
+    return {
+        type: 'time',
+        axisLine: { lineStyle: { color: css('--baseline') } },
+        axisLabel: { color: css('--muted'), hideOverlap: true, formatter: v => fmtTs(v, withTime) },
+        splitLine: { show: false },
+        axisTick: { show: false },
+    };
+}
+function baseYAxis(name) {
+    return {
+        type: 'value', name, nameTextStyle: { color: css('--muted'), align: 'left' },
+        axisLabel: { color: css('--muted'), formatter: v => fmtCompact(v) },
+        splitLine: { lineStyle: { color: css('--grid'), width: 1 } },
+    };
+}
+function baseTooltip(withTime, unit) {
+    return {
+        trigger: 'axis',
+        axisPointer: { type: 'line', lineStyle: { color: css('--baseline') } },
+        backgroundColor: css('--surface'), borderColor: css('--border'),
+        textStyle: { color: css('--ink'), fontSize: 12.5 },
+        order: 'valueDesc',
+        formatter: (params) => {
+            const root = document.createElement('div');
+            const head = document.createElement('div');
+            head.style.cssText = 'color:' + css('--muted') + ';margin-bottom:4px';
+            head.textContent = fmtTs(params[0].value[0], withTime);
+            root.appendChild(head);
+            for (const p of params) {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;align-items:center;gap:6px';
+                const key = document.createElement('span');
+                key.style.cssText = `width:12px;height:2px;background:${p.color};display:inline-block`;
+                const val = document.createElement('b');
+                val.textContent = (unit === '$' ? '$' : '') + fmtInt(p.value[1]) + (unit === '$' ? '' : ' ' + unit);
+                const name = document.createElement('span');
+                name.style.cssText = 'color:' + css('--ink-2');
+                name.textContent = p.seriesName;
+                row.append(key, val, name);
+                root.appendChild(row);
+            }
+            return root;
+        },
+    };
+}
+
+function renderGen(rows, bucket) {
+    const byFuel = new Map();
+    for (const r of rows) {
+        const fuel = fuelSlots.has(r.fuel) ? r.fuel : 'Other';
+        if (!byFuel.has(fuel)) byFuel.set(fuel, new Map());
+        const m = byFuel.get(fuel);
+        const t = Number(r.t);
+        m.set(t, (m.get(t) || 0) + num(r.mw));
+    }
+    const series = fuelOrder.filter(f => byFuel.has(f)).map(f => ({
+        name: f, type: 'line', stack: 'gen', showSymbol: false, smooth: false,
+        lineStyle: { width: 1 }, color: fuelSlots.get(f),
+        emphasis: { focus: 'series' },
+        areaStyle: { opacity: 0.55 },
+        data: [...byFuel.get(f).entries()].sort((a, b) => a[0] - b[0]),
+    }));
+    charts.gen.setOption({
+        animation: false,
+        color: series.map(s => s.color),
+        legend: { textStyle: { color: css('--ink-2') }, icon: 'roundRect', itemWidth: 12, itemHeight: 8, top: 0 },
+        grid: { left: 56, right: 16, top: 34, bottom: 28 },
+        xAxis: baseAxis(bucket.withTime), yAxis: baseYAxis('MW'),
+        tooltip: baseTooltip(bucket.withTime, 'MW'),
+        series,
+    }, true);
+    $('gen-desc').textContent = `Mean output per ${bucket.label.replace(' average', '')}, MW`;
+    tableFrom('table-gen', ['interval', 'fuel', 'MW'], rows.map(r => [fmtTs(Number(r.t), bucket.withTime), r.fuel, fmtInt(r.mw)]));
+}
+
+const REGION_SLOT = { NSW1: 0, QLD1: 1, SA1: 2, TAS1: 3, VIC1: 4, WA1: 5 };
+function renderPrice(rows, bucket) {
+    const byRegion = new Map();
+    for (const r of rows) {
+        if (!byRegion.has(r.Region)) byRegion.set(r.Region, []);
+        byRegion.get(r.Region).push([Number(r.t), num(r.price)]);
+    }
+    const slots = SLOTS();
+    const series = [...byRegion.keys()].sort().map(reg => ({
+        name: reg, type: 'line', showSymbol: false,
+        lineStyle: { width: 2 }, color: slots[REGION_SLOT[reg] ?? 6],
+        emphasis: { focus: 'series' },
+        data: byRegion.get(reg).sort((a, b) => a[0] - b[0]),
+    }));
+    charts.price.setOption({
+        animation: false,
+        color: series.map(s => s.color),
+        legend: { textStyle: { color: css('--ink-2') }, icon: 'rect', itemWidth: 14, itemHeight: 2, top: 0 },
+        grid: { left: 56, right: 16, top: 34, bottom: 28 },
+        xAxis: baseAxis(bucket.withTime), yAxis: baseYAxis('$/MWh'),
+        tooltip: baseTooltip(bucket.withTime, '$'),
+        series,
+    }, true);
+    tableFrom('table-price', ['interval', 'region', '$/MWh'], rows.map(r => [fmtTs(Number(r.t), bucket.withTime), r.Region, fmtInt(r.price)]));
+}
+
+function renderTop(rows) {
+    const cats = rows.map(r => r.DUID).reverse();
+    const vals = rows.map(r => num(r.mwh)).reverse();
+    charts.top.setOption({
+        animation: false,
+        grid: { left: 110, right: 60, top: 8, bottom: 28 },
+        xAxis: {
+            type: 'value',
+            axisLabel: { color: css('--muted'), formatter: v => fmtCompact(v) },
+            splitLine: { lineStyle: { color: css('--grid'), width: 1 } },
+        },
+        yAxis: {
+            type: 'category', data: cats,
+            axisLine: { lineStyle: { color: css('--baseline') } },
+            axisLabel: { color: css('--ink-2') }, axisTick: { show: false },
+        },
+        tooltip: {
+            trigger: 'item', backgroundColor: css('--surface'), borderColor: css('--border'),
+            textStyle: { color: css('--ink'), fontSize: 12.5 },
+            formatter: p => {
+                const root = document.createElement('div');
+                const b = document.createElement('b'); b.textContent = fmtInt(p.value) + ' MWh';
+                const s = document.createElement('div'); s.style.color = css('--ink-2');
+                const row = rows[rows.length - 1 - p.dataIndex];
+                s.textContent = `${row.DUID} · ${row.fuel ?? ''} · ${row.Region ?? ''}`;
+                root.append(b, s);
+                return root;
+            },
+        },
+        series: [{
+            type: 'bar', data: vals, barMaxWidth: 18,
+            itemStyle: { color: css('--accent'), borderRadius: [0, 4, 4, 0] },
+            label: { show: true, position: 'right', color: css('--ink-2'), formatter: p => fmtCompact(p.value) },
+        }],
+    }, true);
+    tableFrom('table-top', ['DUID', 'fuel', 'region', 'MWh'], rows.map(r => [r.DUID, r.fuel, r.Region, fmtInt(r.mwh)]));
+}
+
+function tableFrom(id, headers, rows) {
+    const wrap = $(id);
+    wrap.replaceChildren();
+    const t = document.createElement('table');
+    const tr = document.createElement('tr');
+    for (const h of headers) { const th = document.createElement('th'); th.textContent = h; tr.appendChild(th); }
+    t.appendChild(tr);
+    for (const r of rows.slice(0, 500)) {
+        const row = document.createElement('tr');
+        for (const c of r) { const td = document.createElement('td'); td.textContent = c ?? ''; row.appendChild(td); }
+        t.appendChild(row);
+    }
+    wrap.appendChild(t);
+}
+
+// ---------------------------------------------------------------------------
+// Query orchestration
+// ---------------------------------------------------------------------------
+let running = false;
+async function runAll() {
+    if (running) return;
+    running = true;
+    const t0 = performance.now();
+    document.querySelectorAll('.card, .kpis').forEach(el => el.classList.add('loading'));
+    const status = m => { $('status').textContent = m; };
+    try {
+        if (!fuelOrder.length) {
+            status('loading dimensions…');
+            await rq(`CREATE OR REPLACE TEMP TABLE tdim AS
+                      SELECT DUID, Region, coalesce(FuelSourceDescriptor, 'Unknown') AS fuel, Participant, State
+                      FROM onelake.mart.dim_duid`);
+            const regions = await q(`SELECT DISTINCT Region FROM tdim ORDER BY 1`);
+            const regSel = $('region');
+            for (const r of regions) {
+                const o = document.createElement('option'); o.value = r.Region; o.textContent = r.Region; regSel.appendChild(o);
+            }
+        }
+
+        const needWindow = !loadedWindow || loadedWindow.days !== state.days;
+        if (needWindow) {
+            status(`reading ${state.days === 1 ? "today's" : state.days + ' days of'} Iceberg data from OneLake… (first read of a range is the slow part)`);
+            const n = await buildWindow();
+            if (!n) { status('no recent data found in fct_summary'); return; }
+        }
+        const grain = loadedWindow.grain;
+
+        if (!fuelOrder.length) {
+            // Fuel -> color slot, fixed for the whole session on first load.
+            const fuels = await q(`
+                SELECT d.fuel, sum(w.mw)::DOUBLE AS total
+                FROM twin w JOIN tdim d ON w.DUID = d.DUID
+                GROUP BY 1 ORDER BY total DESC`);
+            const slots = SLOTS();
+            fuelOrder = fuels.slice(0, 7).map(r => r.fuel);
+            fuelOrder.forEach((f, i) => fuelSlots.set(f, slots[i]));
+            fuelOrder.push('Other');
+            fuelSlots.set('Other', css('--other'));
+            const fuelSel = $('fuel');
+            for (const f of fuels.map(r => r.fuel).sort()) {
+                const o = document.createElement('option'); o.value = f; o.textContent = f; fuelSel.appendChild(o);
+            }
+        }
+
+        const where = localWhere();
+
+        const kpi = (await q(`
+            SELECT round(sum(w.mwh))::DOUBLE AS mwh, round(avg(w.price), 2)::DOUBLE AS price,
+                   count(DISTINCT w.DUID)::DOUBLE AS gens, max(w.cutoff)::varchar AS cutoff
+            FROM twin w JOIN tdim d ON w.DUID = d.DUID
+            WHERE ${where}`))[0] || {};
+        $('kpi-mwh').replaceChildren(fmtCompact(num(kpi.mwh)), Object.assign(document.createElement('span'), { className: 'unit', textContent: 'MWh' }));
+        $('kpi-price').replaceChildren('$' + (num(kpi.price) == null ? '—' : num(kpi.price).toFixed(2)), Object.assign(document.createElement('span'), { className: 'unit', textContent: '/MWh' }));
+        $('kpi-gens').textContent = fmtInt(num(kpi.gens));
+        $('kpi-cutoff').textContent = kpi.cutoff ? String(kpi.cutoff).slice(0, 16) : '—';
+        $('freshness').hidden = false;
+        $('freshness').textContent = 'data to ' + (kpi.cutoff ? String(kpi.cutoff).slice(0, 16) : loadedWindow.end);
+
+        renderGen(await q(`
+            SELECT w.t, d.fuel, sum(w.mw)::DOUBLE AS mw
+            FROM twin w JOIN tdim d ON w.DUID = d.DUID
+            WHERE ${where}
+            GROUP BY 1, 2 ORDER BY 1`), grain);
+
+        renderPrice(await q(`
+            SELECT w.t, d.Region, avg(w.price)::DOUBLE AS price
+            FROM twin w JOIN tdim d ON w.DUID = d.DUID
+            WHERE ${where}
+            GROUP BY 1, 2 ORDER BY 1`), grain);
+
+        renderTop(await q(`
+            SELECT w.DUID, any_value(d.fuel) AS fuel, any_value(d.Region) AS Region, round(sum(w.mwh))::DOUBLE AS mwh
+            FROM twin w JOIN tdim d ON w.DUID = d.DUID
+            WHERE ${where}
+            GROUP BY 1 ORDER BY mwh DESC LIMIT 12`));
+
+        status(`done in ${((performance.now() - t0) / 1000).toFixed(1)}s · ${fmtInt(loadedWindow.rows)} rows local`);
+    } catch (e) {
+        console.error(e);
+        status('error: ' + String(e && e.message || e).slice(0, 200));
+    } finally {
+        document.querySelectorAll('.card, .kpis').forEach(el => el.classList.remove('loading'));
+        running = false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------
+async function start(token) {
+    $('hero').hidden = true;
+    $('app').hidden = false;
+    if (account) { $('account').hidden = false; $('account').textContent = account.username; $('signout').hidden = false; }
+    charts.gen = echarts.init($('chart-gen'), null, { renderer: 'svg' });
+    charts.price = echarts.init($('chart-price'), null, { renderer: 'svg' });
+    charts.top = echarts.init($('chart-top'), null, { renderer: 'svg' });
+    addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
+    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (loadedWindow) runAll(); });
+    $('status').textContent = 'starting DuckDB…';
+    await initDuck(token);
+    setInterval(refreshTokenLoop, 10 * 60 * 1000);
+    $('sqlbox').value = `SELECT d.State, round(sum(f.mw)/12) AS mwh\nFROM onelake.mart.fct_summary f\nJOIN onelake.mart.dim_duid d ON f.DUID = d.DUID\nWHERE f.date >= DATE '${minusDays(brisbaneToday(), 1)}'\nGROUP BY 1 ORDER BY 2 DESC;`;
+    await runAll();
+}
+
+$('signin').onclick = async () => {
+    $('heroerr').textContent = '';
+    try {
+        const token = await getToken(true);
+        await start(token);
+    } catch (e) {
+        $('heroerr').textContent = String(e && e.message || e).slice(0, 400);
+    }
+};
+$('signout').onclick = () => { sessionStorage.clear(); location.reload(); };
+$('refresh').onclick = () => { loadedWindow = null; runAll(); };
+$('region').onchange = e => { state.region = e.target.value; runAll(); };
+$('fuel').onchange = e => { state.fuel = e.target.value; runAll(); };
+$('rangeseg').addEventListener('click', e => {
+    const b = e.target.closest('button[data-days]');
+    if (!b) return;
+    document.querySelectorAll('#rangeseg button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+    state.days = Number(b.dataset.days);
+    runAll();
+});
+$('runsql').onclick = async () => {
+    $('sqlerrbox').textContent = '';
+    $('table-sql').replaceChildren();
+    try {
+        const t = await conn.query($('sqlbox').value);
+        const cols = t.schema.fields.map(f => f.name);
+        const rows = t.toArray().map(r => { const j = r.toJSON(); return cols.map(c => { const v = j[c]; return typeof v === 'bigint' ? v.toString() : v; }); });
+        tableFrom('table-sql', cols, rows);
+    } catch (e) {
+        $('sqlerrbox').textContent = String(e && e.message || e).slice(0, 600);
+    }
+};
+
+// Hooks for automated end-to-end tests: bypass MSAL with a caller-supplied token.
+window.__dashboardStartWithToken = (token) => start(token);
+window.__charts = charts;
+window.__dashboardReady = true;
+</script>
+</body>
+</html>

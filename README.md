@@ -16,7 +16,8 @@
 # dbt + DuckDB + OneLake Iceberg REST Catalog
 
 [![Pipeline](https://github.com/djouallah/dbt_fabric_python_iceberg/actions/workflows/pipeline.yml/badge.svg)](https://github.com/djouallah/dbt_fabric_python_iceberg/actions/workflows/pipeline.yml)
-[![dbt docs](https://img.shields.io/badge/dbt%20docs-live-blue)](https://djouallah.github.io/dbt_fabric_python_iceberg/)
+[![dashboard](https://img.shields.io/badge/dashboard-live-brightgreen)](https://djouallah.github.io/dbt_fabric_python_iceberg/)
+[![dbt docs](https://img.shields.io/badge/dbt%20docs-live-blue)](https://djouallah.github.io/dbt_fabric_python_iceberg/dag/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Iceberg is cool. The whole pipeline runs anywhere Python runs — your laptop, a GitHub Actions runner, a container, an AI agent. The Delta Lake version of this pipeline lives at <https://github.com/djouallah/dbt_fabric_python_delta>; a fully GitHub-deployed pipeline (no Fabric required) lives at <https://github.com/djouallah/analytics-as-code>. This repo is the Iceberg variant — it writes to the OneLake Iceberg REST catalog, which is what enables Power BI Direct Lake via OneLake's Iceberg→Delta virtualization.
@@ -108,7 +109,7 @@ GitHub Actions CI
     ├── duckrun    → provision Lakehouse (with schemas)
     ├── dbt run    (DuckDB + OneLake Iceberg)
     ├── dbt test   (validates Iceberg table row counts)
-    └── dbt docs   → GitHub Pages
+    └── dashboard + dbt docs → GitHub Pages (docs under /dag)
     │
     ▼ (main only)
 deploy.py (duckrun)
@@ -157,7 +158,25 @@ The only GitHub secrets you need:
 
 On the Azure side, register an app and add a **federated credential** with subject `repo:<owner>/<repo>:ref:refs/heads/main`. Grant it the Fabric workspace permissions you need.
 
-Every branch runs the dbt build (run/test/docs) and publishes docs to GitHub Pages. Only pushes to `main` deploy the Fabric items (`deploy.py` is hardcoded to one workspace).
+Every branch runs the dbt build (run/test/docs) and publishes the site to GitHub Pages (dashboard at the root, dbt docs under `/dag/`). Only pushes to `main` deploy the Fabric items (`deploy.py` is hardcoded to one workspace).
+
+### Live dashboard (browser-side Iceberg reads)
+
+[`dashboard/index.html`](dashboard/index.html) is a single static page that queries the **Iceberg tables live from OneLake — in the browser, no backend, no data exports**:
+
+- **Sign in with Microsoft** (MSAL popup, an Entra SPA app registration with the delegated
+  `Azure Storage / user_impersonation` scope). Viewers need read access to the Fabric workspace —
+  the page holds no secrets, only the public client id.
+- **DuckDB-WASM + the iceberg extension** attach the OneLake Iceberg REST catalog directly
+  (`ATTACH '{ws}/{lh}' (TYPE ICEBERG, ENDPOINT ...)`) with the user's bearer token.
+- **One bridge is required**: the DuckDB `azure` extension has no WASM build, so the page installs
+  a small network shim inside the DuckDB worker that injects the bearer token on OneLake requests
+  and rewrites `abfss://{ws}@onelake.dfs...` to `https://onelake.dfs.../{ws}/` in catalog/manifest
+  responses (the two forms are byte-length-identical, so even binary avro rewrites cleanly).
+  Data then flows through the WASM-native httpfs path.
+- Each date range does **one remote scan into a local temp table**; KPIs, charts, and the
+  region/fuel filters are answered locally and instantly after that.
+- The **Analyze** card is a free-form SQL box over the attached catalog.
 
 ---
 
