@@ -595,44 +595,35 @@ function datesBetween(from, to) {
     return out;   // hard cap: nothing legitimate spans >13 years of dates
 }
 
-// Copy parquet data files into the OPFS cache: fetch authed on the main
-// thread (a few downloads ahead), write to OPFS, register a streamed handle.
-// No SQL per file — the data is queried in place, never loaded into memory.
-// Returns the successfully cached entries.
-const INGEST_AHEAD = 4;
+// Copy parquet data files into the OPFS cache: a pool of parallel workers,
+// each running the full fetch → OPFS write → register pipeline (files are
+// independent — unique names, separate OPFS entries). No SQL per file — the
+// data is queried in place, never loaded into memory. Returns the
+// successfully cached entries. ~8 in-flight files ≈ 64 MB peak buffers.
+const INGEST_PARALLEL = 8;
 
 async function ingestFiles(entries, onProgress) {
     if (!entries.length) return [];
-    let idx = 0, done = 0, bytes = 0;
+    let next = 0, done = 0, bytes = 0;
     const okFiles = [];
-    const inflight = new Map();
-    const launch = () => {
-        while (inflight.size < INGEST_AHEAD && idx < entries.length) {
-            const i = idx++, e = entries[i];
-            inflight.set(i, fetchAuthed(e.fp).then(buf => ({ i, e, buf }), err => ({ i, e, err })));
-        }
-    };
-    launch();
-    while (inflight.size) {
-        const res = await Promise.race(inflight.values());
-        inflight.delete(res.i);
-        launch();
-        done++;
-        if (res.err) {
-            console.warn('[ingest] download failed', String(res.e.fp).slice(-40), String(res.err).slice(0, 120));
-        } else {
-            const src = basename(res.e.fp);
+    const workers = Array.from({ length: Math.min(INGEST_PARALLEL, entries.length) }, async () => {
+        while (next < entries.length) {
+            const e = entries[next++];
             try {
-                if (!(await opfsWrite(pqName(src), res.buf))) throw new Error('OPFS write failed');
+                const buf = await fetchAuthed(e.fp);
+                const src = basename(e.fp);
+                if (!(await opfsWrite(pqName(src), buf))) throw new Error('OPFS write failed');
                 await registerOpfs(src);
-                bytes += res.buf.length;
-                okFiles.push({ path: res.e.fp, src, bytes: res.buf.length });
+                bytes += buf.length;
+                okFiles.push({ path: e.fp, src, bytes: buf.length });
             } catch (ex) {
-                console.warn('[ingest] cache failed', src, String(ex && ex.message || ex).slice(0, 140));
+                console.warn('[ingest] failed', String(e.fp).slice(-40), String(ex && ex.message || ex).slice(0, 140));
             }
+            done++;
+            if (onProgress) onProgress(done, entries.length, bytes);
         }
-        if (onProgress) onProgress(done, entries.length, bytes);
-    }
+    });
+    await Promise.all(workers);
     return okFiles;
 }
 
