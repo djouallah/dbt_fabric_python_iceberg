@@ -1,0 +1,43 @@
+name: 🌐 Publish dashboard
+
+# Fast path: publishes ONLY the dashboard to the gh-pages branch root (~30s).
+# The full pipeline (pipeline.yml) publishes dbt docs into /dag on its own cadence;
+# keep_files on both sides means neither publish wipes the other.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "dashboard/**"
+      - ".github/workflows/dashboard.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gh-pages-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: 🌐 Publish to gh-pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🌐 Publish dashboard to gh-pages root
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dashboard
+          keep_files: true   # never wipe /dag (dbt docs)
+
+      - name: 📝 Summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          # 🌐 Dashboard Published
+
+          🔗 https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+          EOF

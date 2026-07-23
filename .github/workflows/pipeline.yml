@@ -6,9 +6,10 @@ on:
     paths:
       - "dbt/**"
       - "fabric_items/**"
-      - "dashboard/**"
       - "deploy.py"
       - ".github/workflows/pipeline.yml"
+  # dashboard/** is NOT a trigger here — dashboard.yml publishes it to gh-pages in ~30s
+  # without running the dbt build.
   # No schedule here — hourly data refreshes live in data.yml (lakehouse check + dbt build
   # only), so scheduled runs never redeploy Fabric items or refresh the semantic model.
   workflow_dispatch:
@@ -19,8 +20,7 @@ concurrency:
 
 permissions:
   id-token: write
-  contents: read
-  pages: write
+  contents: write   # peaceiris publishes dbt docs to the gh-pages branch
 
 env:
   # DuckDB's azure extension reads OneLake over a curl transport (its default transport fails
@@ -54,8 +54,6 @@ jobs:
     name: 🎯 Pipeline
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    outputs:
-      docs_ok: ${{ steps.docs.outcome == 'success' }}
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
@@ -180,20 +178,16 @@ jobs:
           fi
           echo "T_DEPLOY=$(($(date +%s) - T0))" >> "$GITHUB_ENV"
 
-      - name: 🧩 Stage Pages site (dashboard at root, dbt docs at /dag)
+      - name: 🌐 Publish dbt docs to Pages (/dag)
+        # Branch-based Pages: docs land under /dag on gh-pages; keep_files leaves the
+        # dashboard at the site root (published independently by dashboard.yml) untouched.
         if: ${{ always() && steps.docs.outcome == 'success' }}
-        # The dashboard is fully static — it reads the Iceberg tables live from OneLake in the
-        # browser (MSAL sign-in + DuckDB-WASM), so no data files are exported here.
-        run: |
-          mkdir -p /tmp/site/dag
-          cp dashboard/index.html /tmp/site/
-          cp -r dbt/target/* /tmp/site/dag/
-
-      - name: 📤 Upload Pages artifact
-        if: ${{ always() && steps.docs.outcome == 'success' }}
-        uses: actions/upload-pages-artifact@v3
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          path: /tmp/site
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dbt/target
+          destination_dir: dag
+          keep_files: true
 
       - name: 📝 Build dashboard summary
         if: always()
@@ -202,27 +196,3 @@ jobs:
           # job.status inside an always() step reflects whether any earlier step failed.
           JOB_STATUS: ${{ job.status }}
         run: python .github/scripts/summary.py >> "$GITHUB_STEP_SUMMARY"
-
-  publish:
-    name: 🌐 Publish docs to Pages
-    needs: pipeline
-    # Publish whenever docs were generated, even if the pipeline job went red overall.
-    if: ${{ always() && needs.pipeline.outputs.docs_ok == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment:
-      name: github-pages
-      url: ${{ steps.publish.outputs.page_url }}
-    steps:
-      - name: 🌐 Deploy to GitHub Pages
-        id: publish
-        uses: actions/deploy-pages@v4
-      - name: 📝 Summary
-        run: |
-          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
-          # 🌐 Docs Published
-
-          ![status](https://img.shields.io/badge/pages-live-brightgreen?style=for-the-badge&logo=githubpages)
-
-          🔗 **Live site:** ${{ steps.publish.outputs.page_url }}
-          EOF
