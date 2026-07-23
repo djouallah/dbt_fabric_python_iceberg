@@ -277,12 +277,12 @@ async function getToken(interactive) {
 }
 
 // ---------------------------------------------------------------------------
-// DuckDB — a PERSISTENT database living in OPFS. Parquet data files are pulled
-// from OneLake and imported into native tables (PowerBI-import style); the DB
-// file *is* the local cache. No Iceberg attach, no live remote scans.
+// DuckDB — in-memory engine over parquet files cached in OPFS. The data files
+// are copied down from OneLake once (PowerBI-import style) and queried through
+// streamed OPFS file handles, so table size is bounded by disk, not by the
+// WASM heap. No Iceberg attach, no live remote scans.
 // ---------------------------------------------------------------------------
-let db = null, conn = null, worker = null, currentToken = null, persistent = false;
-const OPFS_DB = 'opfs://aemo_cache_v5.db';
+let db = null, conn = null, worker = null, currentToken = null;
 
 async function initDuck(token) {
     currentToken = token;
@@ -291,26 +291,9 @@ async function initDuck(token) {
     worker = new Worker(workerUrl);
     db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker);
     await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
-    try {
-        const RW = (duckdb.DuckDBAccessMode && duckdb.DuckDBAccessMode.READ_WRITE) ?? 3;   // READ_WRITE = 3
-        await db.open({ path: OPFS_DB, accessMode: RW });
-        persistent = true;
-    } catch (e) {
-        console.warn('OPFS persistent DB unavailable — falling back to in-memory (no local cache)', e);
-        persistent = false;
-    }
     conn = await db.connect();
     await q(`SET preserve_insertion_order = false`);
-    await bootstrapSchema();
-    console.log('[t] duckdb ready', persistent ? '(persistent OPFS)' : '(in-memory)', Math.round(performance.now()));
-}
-
-// Cache bookkeeping tables (persist alongside the data). cache_state records
-// each table's Iceberg uuid + snapshot; cached_files lists every data file
-// currently imported, so a snapshot change is a plain file-set diff.
-async function bootstrapSchema() {
-    await q(`CREATE TABLE IF NOT EXISTS cache_state (tbl VARCHAR PRIMARY KEY, table_uuid VARCHAR, snapshot_id VARCHAR)`);
-    await q(`CREATE TABLE IF NOT EXISTS cached_files (tbl VARCHAR, path VARCHAR, src VARCHAR, bytes BIGINT)`);
+    console.log('[t] duckdb ready', Math.round(performance.now()));
 }
 
 // Columnar extraction — much faster than per-row toJSON for wide results.
@@ -415,56 +398,104 @@ const basename = p => String(p).split('/').pop();
 const sortNewest = fs => [...fs].sort((a, b) => String(b.dateMax || '').localeCompare(String(a.dateMax || '')));
 const fmtBytes = n => n < 1e6 ? `${Math.round(n / 1e3)} KB` : n < 1e9 ? `${(n / 1e6).toFixed(1)} MB` : `${(n / 1e9).toFixed(2)} GB`;
 
-// One-time cleanup of the old v4 OPFS parquet caches + localStorage meta index.
+// One-time cleanup of older cache generations (v4 aggregated parquet, v5
+// experiments) in OPFS + localStorage.
 async function cleanupLegacy() {
     try {
         const root = await navigator.storage.getDirectory();
         for await (const [name] of root.entries()) {
-            if (/^aemo_(v\d+|meta)/.test(name) && name.endsWith('.parquet')) { try { await root.removeEntry(name); } catch (e) {} }
+            if (/^aemo_v[45]_/.test(name)) { try { await root.removeEntry(name); } catch (e) {} }
         }
     } catch (e) {}
-    try { for (const k of Object.keys(localStorage)) if (/^aemo_meta_v\d/.test(k)) localStorage.removeItem(k); } catch (e) {}
+    try { for (const k of Object.keys(localStorage)) if (/^aemo_(meta_v\d|v5_meta)/.test(k)) localStorage.removeItem(k); } catch (e) {}
+}
+
+// ---------------------------------------------------------------------------
+// Local cache: the snapshot's parquet DATA FILES are copied into OPFS and
+// registered with DuckDB as streamed file handles; each table is a VIEW over
+// its cached files (with src_file = source parquet name). The data never has
+// to fit in WASM memory — 1GB+ of parquet stays compressed on disk and DuckDB
+// prunes row groups per query. A localStorage meta record per table carries
+// the Iceberg uuid/snapshot + cached-file list, so change capture is a plain
+// file-set diff and a warm boot is just re-registering handles (no data copy).
+// ---------------------------------------------------------------------------
+const metaKey = tbl => `aemo_v6_meta_${tbl}`;
+const pqName = src => `pq_${src}`;
+let cacheMeta = {};   // tbl -> { uuid, snapshot, files: [{path, src, bytes}] }
+const loadMeta = tbl => { try { return JSON.parse(localStorage.getItem(metaKey(tbl)) || 'null'); } catch (e) { return null; } };
+const saveMeta = tbl => { try { localStorage.setItem(metaKey(tbl), JSON.stringify({ ...cacheMeta[tbl], savedAt: Date.now() })); } catch (e) {} };
+
+const opfsRoot = () => navigator.storage.getDirectory();
+
+async function opfsWrite(name, buf) {
+    try {
+        const fh = await (await opfsRoot()).getFileHandle(name, { create: true });
+        const w = await fh.createWritable();
+        await w.write(buf);
+        await w.close();
+        return true;
+    } catch (e) { console.warn('opfs write', name, e); return false; }
+}
+async function opfsDelete(name) {
+    try { await (await opfsRoot()).removeEntry(name); } catch (e) {}
+}
+
+// OPFS file -> DuckDB streamed handle (BROWSER_FSACCESS): reads go straight to
+// disk, nothing is copied into WASM memory.
+async function registerOpfs(src) {
+    try { await db.dropFile(pqName(src)); } catch (e) {}
+    const fh = await (await opfsRoot()).getFileHandle(pqName(src));
+    await db.registerFileHandle(pqName(src), fh, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
+}
+
+async function buildView(tbl) {
+    const files = cacheMeta[tbl] && cacheMeta[tbl].files || [];
+    if (!files.length) return false;
+    await q(`CREATE OR REPLACE VIEW ${tbl} AS
+             SELECT * EXCLUDE (filename), regexp_replace(filename, '^pq_', '') AS src_file
+             FROM read_parquet([${files.map(f => `'${pqName(f.src)}'`).join(', ')}], filename = true)`);
+    return true;
+}
+
+// Warm boot: re-register the cached OPFS files and rebuild the view. Any
+// failure (missing file, no FSACCESS support) falls back to a cold import.
+async function restoreTable(tbl) {
+    const meta = loadMeta(tbl);
+    if (!meta || !meta.files || !meta.files.length) return false;
+    try {
+        for (const f of meta.files) await registerOpfs(f.src);
+        cacheMeta[tbl] = { uuid: meta.uuid, snapshot: meta.snapshot, files: meta.files };
+        if (!(await buildView(tbl))) return false;
+        console.log(`[cache] ${tbl}: restored ${meta.files.length} cached file(s) from OPFS`);
+        return true;
+    } catch (e) {
+        console.warn(`[cache] ${tbl}: restore failed (${String(e && e.message || e).slice(0, 120)}) — cold import`);
+        cacheMeta[tbl] = null;
+        try { localStorage.removeItem(metaKey(tbl)); } catch (e2) {}
+        return false;
+    }
+}
+
+async function dropCachedFile(f) {
+    try { await db.dropFile(pqName(f.src)); } catch (e) {}
+    await opfsDelete(pqName(f.src));
+}
+
+async function wipeTable(tbl) {
+    try { await q(`DROP VIEW IF EXISTS ${tbl}`); } catch (e) {}
+    const meta = cacheMeta[tbl] || loadMeta(tbl);
+    if (meta && meta.files) for (const f of meta.files) await dropCachedFile(f);
+    cacheMeta[tbl] = null;
+    try { localStorage.removeItem(metaKey(tbl)); } catch (e) {}
 }
 
 // loadedWindow is only the RENDER window { grainKey, from, to, rows }. Grain
-// tables tw_<grain> are TEMP aggregations rebuilt from the persistent
-// fct_summary table; gcov tracks the date span each currently holds.
+// tables tw_<grain> are TEMP aggregations rebuilt from the fct_summary view;
+// gcov tracks the date span each currently holds.
 let loadedWindow = null;
 const gcov = {};                 // grain.key -> { from, to, rows }
 const tw = g => `tw_${g.key}`;
 function resetGrains() { for (const k in gcov) delete gcov[k]; loadedWindow = null; }
-
-async function tableExists(tbl) {
-    try { return Number((await q(`SELECT count(*) AS n FROM information_schema.tables WHERE table_name = '${esc(tbl)}'`))[0].n) > 0; }
-    catch (e) { return false; }
-}
-async function tableReady(tbl) {
-    if (!(await tableExists(tbl))) return false;
-    try { return Number((await q(`SELECT count(*) AS n FROM ${tbl}`))[0].n) > 0; }
-    catch (e) { return false; }
-}
-// Bookkeeping (cached_files/cache_state) and the physical table can diverge if a
-// prior run was interrupted or OPFS persisted one but not the other. Trust the
-// physical table: if it's missing/empty but bookkeeping claims data, wipe the
-// stale bookkeeping so the next sync re-imports from scratch instead of trusting
-// a phantom file list (which would leave the table permanently missing).
-async function reconcile(tbl) {
-    const booked = Number((await q(`SELECT count(*) AS n FROM cached_files WHERE tbl = '${esc(tbl)}'`))[0].n) > 0;
-    if (booked && !(await tableReady(tbl))) {
-        console.warn(`[cache] ${tbl}: bookkeeping/table mismatch — clearing stale cache`);
-        await wipeTable(tbl);
-    }
-    return await tableReady(tbl);
-}
-async function setState(tbl, meta) {
-    await q(`DELETE FROM cache_state WHERE tbl = '${esc(tbl)}'`);
-    await q(`INSERT INTO cache_state VALUES ('${esc(tbl)}', '${esc(meta.uuid)}', '${esc(meta.snapshot)}')`);
-}
-async function wipeTable(tbl) {
-    try { await q(`DROP TABLE IF EXISTS ${tbl}`); } catch (e) {}
-    await q(`DELETE FROM cached_files WHERE tbl = '${esc(tbl)}'`);
-    await q(`DELETE FROM cache_state WHERE tbl = '${esc(tbl)}'`);
-}
 
 // One REST call to the Iceberg catalog: table-uuid changes on a rebuild
 // (drop/CREATE OR REPLACE), current-snapshot-id advances on every commit, and
@@ -518,8 +549,13 @@ function boundsToDate(v) {
     const bytes = Array.isArray(a) ? a[0] : a;
     if (bytes == null) return null;
     const u = bytes instanceof Uint8Array ? bytes : Uint8Array.from(Object.values(bytes));
-    if (u.length < 4) return null;
-    return new Date(new DataView(u.buffer, u.byteOffset, 4).getInt32(0, true) * 86400000).toISOString().slice(0, 10);
+    // Field 1 is only a DATE (4-byte int32 epoch-days) on fct tables; on dims it
+    // can be a varchar whose bytes decode to garbage — clamp to a sane range and
+    // return null (= unknown bounds) instead of throwing Invalid time value.
+    if (u.length !== 4) return null;
+    const days = new DataView(u.buffer, u.byteOffset, 4).getInt32(0, true);
+    if (days < 0 || days > 73048) return null;   // 1970..2170
+    try { return new Date(days * 86400000).toISOString().slice(0, 10); } catch (e) { return null; }
 }
 
 async function readManifest(url) {
@@ -559,23 +595,16 @@ function datesBetween(from, to) {
     return out;   // hard cap: nothing legitimate spans >13 years of dates
 }
 
-// Import (bulk copy) parquet data files into the persistent native table — the
-// PowerBI-import model. Each file is fetched authed on the main thread, handed
-// to DuckDB as a registered buffer, and its rows are INSERTed with a src_file
-// column (the parquet basename) so the file set can later be diffed and rows
-// from dropped files removed. Downloads run a few ahead; inserts serialize on
-// the single connection. Each file's INSERT + bookkeeping is one transaction,
-// so a mid-download crash never leaves cached_files out of step with the data.
+// Copy parquet data files into the OPFS cache: fetch authed on the main
+// thread (a few downloads ahead), write to OPFS, register a streamed handle.
+// No SQL per file — the data is queried in place, never loaded into memory.
+// Returns the successfully cached entries.
 const INGEST_AHEAD = 4;
 
-async function ensureDataTable(tbl, parquetName) {
-    const exists = Number((await q(`SELECT count(*) AS n FROM information_schema.tables WHERE table_name = '${esc(tbl)}'`))[0].n);
-    if (!exists) await q(`CREATE TABLE ${tbl} AS SELECT *, CAST(NULL AS VARCHAR) AS src_file FROM read_parquet('${parquetName}') LIMIT 0`);
-}
-
-async function ingestFiles(tbl, entries, onProgress) {
-    if (!entries.length) return 0;
-    let idx = 0, done = 0, bytes = 0, ok = 0;
+async function ingestFiles(entries, onProgress) {
+    if (!entries.length) return [];
+    let idx = 0, done = 0, bytes = 0;
+    const okFiles = [];
     const inflight = new Map();
     const launch = () => {
         while (inflight.size < INGEST_AHEAD && idx < entries.length) {
@@ -589,71 +618,68 @@ async function ingestFiles(tbl, entries, onProgress) {
         inflight.delete(res.i);
         launch();
         done++;
-        if (res.err) { console.warn('[ingest] download failed', String(res.e.fp).slice(-40), res.err); if (onProgress) onProgress(done, entries.length, bytes); continue; }
-        const { e, buf } = res, src = basename(e.fp);
-        try {
-            await db.registerFileBuffer('ing.parquet', buf);
-            await ensureDataTable(tbl, 'ing.parquet');
-            await q(`BEGIN`);
-            await q(`INSERT INTO ${tbl} SELECT *, '${esc(src)}' AS src_file FROM read_parquet('ing.parquet')`);
-            await q(`INSERT INTO cached_files VALUES ('${esc(tbl)}', '${esc(e.fp)}', '${esc(src)}', ${buf.length})`);
-            await q(`COMMIT`);
-            ok++; bytes += buf.length;
-        } catch (ex) {
-            try { await q(`ROLLBACK`); } catch (e2) {}
-            console.warn('[ingest] insert failed', src, String(ex && ex.message || ex).slice(0, 140));
-        } finally {
-            try { await db.dropFile('ing.parquet'); } catch (e2) {}
+        if (res.err) {
+            console.warn('[ingest] download failed', String(res.e.fp).slice(-40), String(res.err).slice(0, 120));
+        } else {
+            const src = basename(res.e.fp);
+            try {
+                if (!(await opfsWrite(pqName(src), res.buf))) throw new Error('OPFS write failed');
+                await registerOpfs(src);
+                bytes += res.buf.length;
+                okFiles.push({ path: res.e.fp, src, bytes: res.buf.length });
+            } catch (ex) {
+                console.warn('[ingest] cache failed', src, String(ex && ex.message || ex).slice(0, 140));
+            }
         }
         if (onProgress) onProgress(done, entries.length, bytes);
     }
-    return ok;
+    return okFiles;
 }
 
 // Change capture as a FILE-SET DIFF (no date logic). uuid change => the table
-// was dropped/recreated, so wipe and re-import. Otherwise download files new to
-// the current snapshot and delete rows of files it no longer references. A
-// partial cache from an interrupted run heals naturally: cached_files reflects
-// exactly what is imported, so the diff just fills the gap.
+// was dropped/recreated, so wipe and re-download. Otherwise: fetch files new
+// to the current snapshot, delete cached files it no longer references, and
+// rebuild the view. A partial cache from an interrupted run heals naturally —
+// the meta lists exactly what is cached, so the diff just fills the gap.
 async function syncTable(tbl, opts = {}) {
     const { onProgress, priorityRange, onPriorityDone } = opts;
     const meta = await fetchTableMeta(tbl);
     if (!meta) throw new Error('OneLake catalog unreachable');
-    const state = (await q(`SELECT table_uuid, snapshot_id FROM cache_state WHERE tbl = '${esc(tbl)}'`))[0] || null;
+    let cur = cacheMeta[tbl];
     let result;
-    if (state && state.table_uuid !== meta.uuid) { await wipeTable(tbl); result = 'rebuilt'; }
-    else if (state && state.snapshot_id === meta.snapshot) return 'unchanged';
-    else result = state ? 'updated' : 'built';
+    if (cur && cur.uuid !== meta.uuid) { await wipeTable(tbl); cur = null; result = 'rebuilt'; }
+    else if (cur && cur.snapshot === meta.snapshot) return 'unchanged';
+    else result = cur ? 'updated' : 'built';
 
     const files = await listSnapshotFiles(meta);
     const want = new Map(files.map(f => [f.fp, f]));
-    const have = new Map((await q(`SELECT path, src FROM cached_files WHERE tbl = '${esc(tbl)}'`)).map(r => [r.path, r.src]));
-    const toDel = [...have.keys()].filter(p => !want.has(p));
-    if (toDel.length) {
-        await q(`DELETE FROM ${tbl} WHERE src_file IN (${toDel.map(p => `'${esc(have.get(p))}'`).join(', ')})`);
-        await q(`DELETE FROM cached_files WHERE tbl = '${esc(tbl)}' AND path IN (${toDel.map(p => `'${esc(p)}'`).join(', ')})`);
-    }
-    let toAdd = sortNewest(files.filter(f => !have.has(f.fp)));   // newest first
-    let imported = 0;
+    const haveList = cur && cur.files || [];
+    const have = new Set(haveList.map(f => f.path));
+    for (const f of haveList.filter(f => !want.has(f.path))) await dropCachedFile(f);
+    const kept = haveList.filter(f => want.has(f.path));
+    const toAdd = sortNewest(files.filter(f => !have.has(f.fp)));   // newest first
+
+    const finishSet = async (added) => {
+        cacheMeta[tbl] = { uuid: meta.uuid, snapshot: meta.snapshot, files: [...kept, ...added] };
+        await buildView(tbl);
+    };
+    let added = [];
     if (toAdd.length && priorityRange && onPriorityDone) {
-        // Import the files overlapping the visible window first, render, then
-        // continue with the rest in the background — the default view lands early.
+        // Cache the files overlapping the visible window first, render, then
+        // continue with the rest — the default view lands early.
         const pri = toAdd.filter(f => overlaps(f, priorityRange.from, priorityRange.to));
         const rest = toAdd.filter(f => !overlaps(f, priorityRange.from, priorityRange.to));
-        imported += await ingestFiles(tbl, pri, onProgress);
-        if (pri.length && await tableExists(tbl)) await onPriorityDone();   // only render once the table really exists
-        imported += await ingestFiles(tbl, rest, onProgress);
+        added = await ingestFiles(pri, onProgress);
+        if (added.length) { await finishSet(added); await onPriorityDone(); }
+        added = added.concat(await ingestFiles(rest, onProgress));
     } else {
-        imported += await ingestFiles(tbl, toAdd, onProgress);
+        added = await ingestFiles(toAdd, onProgress);
     }
-    // If we set out to import files but none landed, the table may not exist —
-    // don't record a snapshot (that would make the next run think it's current).
-    // Surface the real cause instead of a downstream "table does not exist".
-    if (toAdd.length && !(await tableExists(tbl))) {
-        throw new Error(`${tbl}: imported 0 of ${toAdd.length} data file(s) — downloads failed (check network/CORS/auth)`);
+    if (!kept.length && !added.length) {
+        throw new Error(`${tbl}: cached 0 of ${toAdd.length} data file(s) — downloads failed (check network/CORS/auth)`);
     }
-    await setState(tbl, meta);
-    if (persistent) { try { await q(`CHECKPOINT`); } catch (e) {} }
+    await finishSet(added);
+    saveMeta(tbl);   // snapshot id advances only after the whole sync landed
     return result;
 }
 
@@ -667,7 +693,7 @@ function getRange() { return { from: $('dateFrom').value, to: $('dateTo').value 
 // ---------------------------------------------------------------------------
 async function ensureGrain(from, to) {
     const grain = grainFor(spanDays(from, to));
-    if (!(await tableExists('fct_summary'))) throw new Error('no data imported yet — import from OneLake first');
+    if (!cacheMeta.fct_summary || !cacheMeta.fct_summary.files.length) throw new Error('no data cached yet — import from OneLake first');
     const cov = gcov[grain.key];
     if (cov && cov.from <= from && cov.to >= to) {
         loadedWindow = { grainKey: grain.key, from, to, rows: cov.rows };
@@ -1235,10 +1261,9 @@ async function start(token) {
 
     $('sqlbox').value = `SELECT d.State, round(sum(f.mw) / 12) AS mwh\nFROM fct_summary f\nJOIN dim_duid d ON f.DUID = d.DUID\nWHERE f.date >= DATE '${minusDays(end, 1)}'\nGROUP BY 1 ORDER BY 2 DESC;`;
 
-    // Dimensions: if already imported (and physically present), build tdim from
-    // the local copy instantly; otherwise pull it (tiny). Filters need it before
-    // the first render. reconcile() clears any stale bookkeeping first.
-    if (await reconcile('dim_duid')) {
+    // Dimensions: if cached in OPFS, restore and build tdim instantly;
+    // otherwise pull it (tiny). Filters need it before the first render.
+    if (await restoreTable('dim_duid')) {
         await buildTdim();
         await populateFilters();
     } else {
@@ -1249,7 +1274,7 @@ async function start(token) {
     }
 
     const { from, to } = getRange();
-    if (await reconcile('fct_summary')) {
+    if (await restoreTable('fct_summary')) {
         // Warm cache: render instantly from the local DB, then check OneLake in
         // the background and re-render only if a new snapshot changed the files.
         await renderAll();
