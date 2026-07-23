@@ -440,12 +440,25 @@ async function opfsDelete(name) {
     try { await (await opfsRoot()).removeEntry(name); } catch (e) {}
 }
 
-// OPFS file -> DuckDB streamed handle (BROWSER_FSACCESS): reads go straight to
-// disk, nothing is copied into WASM memory.
+// OPFS file -> DuckDB handle, registered as a plain File blob
+// (BROWSER_FILEREADER): chunked, LOCK-FREE reads straight from disk, nothing
+// copied into WASM memory. Deliberately not BROWSER_FSACCESS — sync access
+// handles take an EXCLUSIVE per-file lock, so a second dashboard tab (or a
+// not-yet-torn-down worker from a previous load) breaks every register/write
+// with "Access Handles cannot be created" / NoModificationAllowedError.
 async function registerOpfs(src) {
     try { await db.dropFile(pqName(src)); } catch (e) {}
-    const fh = await (await opfsRoot()).getFileHandle(pqName(src));
-    await db.registerFileHandle(pqName(src), fh, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
+    const file = await (await (await opfsRoot()).getFileHandle(pqName(src))).getFile();
+    await db.registerFileHandle(pqName(src), file, duckdb.DuckDBDataProtocol.BROWSER_FILEREADER, false);
+}
+
+// Cross-tab mutex for the WRITE path (imports/syncs): reads are lock-free, but
+// two tabs downloading into the same OPFS files would still collide. A second
+// tab waits here, then finds the cache already populated and restores from it.
+const SYNC_LOCK = 'aemo_v6_sync';
+async function withSyncLock(fn) {
+    if (!navigator.locks) return await fn();
+    return await navigator.locks.request(SYNC_LOCK, fn);
 }
 
 async function buildView(tbl) {
@@ -657,9 +670,14 @@ async function syncTable(tbl, opts = {}) {
     let added = [];
     if (toAdd.length && priorityRange && onPriorityDone) {
         // Cache the files overlapping the visible window first, render, then
-        // continue with the rest — the default view lands early.
-        const pri = toAdd.filter(f => overlaps(f, priorityRange.from, priorityRange.to));
-        const rest = toAdd.filter(f => !overlaps(f, priorityRange.from, priorityRange.to));
+        // continue with the rest — the default view lands early. When manifest
+        // date bounds can't identify the window (some snapshots carry none),
+        // fall back to the first few files: newest-first order means they
+        // cover the default view anyway.
+        let pri = toAdd.filter(f => overlaps(f, priorityRange.from, priorityRange.to));
+        if (!pri.length || pri.length === toAdd.length) pri = toAdd.slice(0, 8);
+        const priSet = new Set(pri.map(f => f.fp));
+        const rest = toAdd.filter(f => !priSet.has(f.fp));
         added = await ingestFiles(pri, onProgress);
         if (added.length) { await finishSet(added); await onPriorityDone(); }
         added = added.concat(await ingestFiles(rest, onProgress));
@@ -720,12 +738,14 @@ async function syncAll(onProgress) {
     if (syncing) return null;
     syncing = true;
     try {
-        const f = await syncTable('fct_summary', { onProgress });
-        const d = await syncTable('dim_duid', { onProgress });
-        if (d !== 'unchanged') { await buildTdim(); await populateFilters(); }
-        const changed = f !== 'unchanged' || d !== 'unchanged';
-        if (changed) resetGrains();
-        return { f, d, changed };
+        return await withSyncLock(async () => {
+            const f = await syncTable('fct_summary', { onProgress });
+            const d = await syncTable('dim_duid', { onProgress });
+            if (d !== 'unchanged') { await buildTdim(); await populateFilters(); }
+            const changed = f !== 'unchanged' || d !== 'unchanged';
+            if (changed) resetGrains();
+            return { f, d, changed };
+        });
     } finally { syncing = false; }
 }
 
@@ -1254,15 +1274,17 @@ async function start(token) {
 
     // Dimensions: if cached in OPFS, restore and build tdim instantly;
     // otherwise pull it (tiny). Filters need it before the first render.
-    if (await restoreTable('dim_duid')) {
-        await buildTdim();
-        await populateFilters();
-    } else {
+    // Imports take the cross-tab lock; after waiting on it, re-try restore —
+    // another tab may have populated the cache meanwhile.
+    if (!(await restoreTable('dim_duid'))) {
         setStatus('Importing dimensions…', 'loading');
-        await syncTable('dim_duid', { onProgress: (d, t) => setStatus(`importing dimensions… ${d}/${t}`, 'loading') });
-        await buildTdim();
-        await populateFilters();
+        await withSyncLock(async () => {
+            if (await restoreTable('dim_duid')) return;
+            await syncTable('dim_duid', { onProgress: (d, t) => setStatus(`importing dimensions… ${d}/${t}`, 'loading') });
+        });
     }
+    await buildTdim();
+    await populateFilters();
 
     const { from, to } = getRange();
     if (await restoreTable('fct_summary')) {
@@ -1279,12 +1301,16 @@ async function start(token) {
     } else {
         // Cold: import the current snapshot's data files. Files overlapping the
         // default window land first so the dashboard paints before the full
-        // history finishes downloading.
+        // history finishes downloading. If another tab is importing, wait on
+        // the lock and restore from its finished cache instead.
         setStatus('Importing data from OneLake…', 'loading');
-        await syncTable('fct_summary', {
-            priorityRange: { from, to },
-            onPriorityDone: async () => { await renderAll(); },
-            onProgress: (d, t, b) => setStatus(`importing ${d}/${t} files · ${fmtBytes(b)}`, 'loading'),
+        await withSyncLock(async () => {
+            if (await restoreTable('fct_summary')) return;
+            await syncTable('fct_summary', {
+                priorityRange: { from, to },
+                onPriorityDone: async () => { await renderAll(); },
+                onProgress: (d, t, b) => setStatus(`importing ${d}/${t} files · ${fmtBytes(b)}`, 'loading'),
+            });
         });
         resetGrains();
         await renderAll();
