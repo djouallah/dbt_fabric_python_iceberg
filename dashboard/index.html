@@ -142,7 +142,7 @@ footer a { color: inherit; }
 <header>
   <div>
     <h1>AEMO Live</h1>
-    <div class="subtitle">Iceberg on OneLake · queried in your browser</div>
+    <div class="subtitle">Iceberg on OneLake · imported &amp; queried in your browser</div>
   </div>
   <div class="filter-group">
     <label>Region</label>
@@ -171,6 +171,10 @@ footer a { color: inherit; }
   </div>
   <button class="plain" id="refreshBtn" hidden title="Check OneLake for a new snapshot">⟳ Refresh</button>
   <button class="plain" id="signout" hidden>Sign out</button>
+  <a href="dag/" target="_blank" rel="noopener" title="View dbt lineage diagram"
+     style="display:inline-flex;align-items:center;color:var(--muted)">
+    <svg height="18" width="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="dbt diagram"><rect x="2" y="4" width="6" height="6" rx="1"/><rect x="2" y="14" width="6" height="6" rx="1"/><rect x="16" y="9" width="6" height="6" rx="1"/><path d="M8 7h4a2 2 0 0 1 2 2v.5M8 17h4a2 2 0 0 0 2-2v-.5"/></svg>
+  </a>
   <a href="https://github.com/djouallah/dbt_fabric_python_iceberg" target="_blank" rel="noopener" title="View source on GitHub"
      style="display:inline-flex;align-items:center;color:var(--muted)">
     <svg height="18" width="18" viewBox="0 0 16 16" fill="currentColor" aria-label="GitHub"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -185,8 +189,9 @@ footer a { color: inherit; }
 
 <div id="hero">
   <h2>Sign in to query OneLake</h2>
-  <p>This dashboard attaches the OneLake Iceberg REST catalog with DuckDB-WASM and runs every
-     query in your browser — no backend, no extracts. You need read access to the Fabric workspace.</p>
+  <p>This dashboard imports the OneLake Iceberg data files into a local DuckDB database in your
+     browser (PowerBI-import style) and runs every query on that local copy — no backend, no server
+     round-trips. You need read access to the Fabric workspace.</p>
   <button class="primary" id="signin">Sign in with Microsoft</button>
   <div class="err" id="heroerr"></div>
 </div>
@@ -222,7 +227,7 @@ footer a { color: inherit; }
 <div id="view-analyze" hidden>
   <div class="analyze-wrap">
     <div class="analyze-head">
-      <label>SQL <span>— local (instant): tw_5min / tw_hour / tw_day + tdim · live catalog: onelake.mart.*</span></label>
+      <label>SQL <span>— all local: fct_summary / dim_duid (raw, full history) · tw_5min / tw_hour / tw_day · tdim</span></label>
       <button class="plain" id="runsql">Run</button>
       <button class="plain primary" id="csvsql">Download CSV</button>
     </div>
@@ -233,7 +238,7 @@ footer a { color: inherit; }
 </div>
 
 <footer>
-  Data © AEMO · OneLake Iceberg REST catalog read live by DuckDB-WASM ·
+  Data © AEMO · OneLake Iceberg imported into a local DuckDB-WASM database ·
   <a href="dag/" target="_blank">dbt docs</a> ·
   <a href="https://github.com/djouallah/dbt_fabric_python_iceberg" target="_blank">source</a>
 </footer>
@@ -249,83 +254,6 @@ const ENDPOINT  = "https://onelake.table.fabric.microsoft.com/iceberg";
 const TENANT    = "4a86d5bb-4173-45ee-bfd5-a3b56ee2d3d5";
 const CLIENT_ID = "ef92c4a2-83b1-4216-b626-286f21c2c5da";
 const SCOPES    = ["https://storage.azure.com/user_impersonation"];
-
-// ---------------------------------------------------------------------------
-// Worker network bridge. The azure extension has no WASM build, so abfss://
-// paths coming back from the catalog would fail. OneLake serves the identical
-// bytes over https, and `abfss://{ws}@host/` and `https://host/{ws}/` are the
-// same byte length, so responses (JSON and avro alike) can be rewritten in
-// place. The bridge also injects the Entra bearer token on OneLake requests.
-// Runs inside the DuckDB worker, installed before importScripts.
-// ---------------------------------------------------------------------------
-function workerPatch(WS, token) {
-    let TOKEN = token;
-    const ABFSS = 'abfss://' + WS + '@onelake.dfs.fabric.microsoft.com/';
-    const HTTPS = 'https://onelake.dfs.fabric.microsoft.com/' + WS + '/';
-    const isOL = u => typeof u === 'string' && (u.indexOf('onelake.dfs.fabric.microsoft.com') !== -1 || u.indexOf('onelake.table.fabric.microsoft.com') !== -1);
-    const enc = new TextEncoder();
-    const A = enc.encode(ABFSS), H = enc.encode(HTTPS);
-    const rewriteBuf = (buf) => {
-        const u = new Uint8Array(buf), m = A.length;
-        let i = 0;
-        while (true) {
-            i = u.indexOf(A[0], i);
-            if (i === -1 || i + m > u.length) break;
-            let k = 1;
-            while (k < m && u[i + k] === A[k]) k++;
-            if (k === m) { u.set(H, i); i += m; } else i++;
-        }
-        return buf;
-    };
-    const rewriteStr = s => s.split(ABFSS).join(HTTPS);
-    const Real = self.XMLHttpRequest;
-    self.XMLHttpRequest = class extends Real {
-        open(method, url, ...rest) {
-            this.__ol = isOL(String(url));
-            this.__hasAuth = false;
-            return rest.length ? super.open(method, url, ...rest) : super.open(method, url);
-        }
-        setRequestHeader(k, v) {
-            if (String(k).toLowerCase() === 'authorization') this.__hasAuth = true;
-            return super.setRequestHeader(k, v);
-        }
-        send(body) {
-            if (this.__ol && !this.__hasAuth) { try { super.setRequestHeader('Authorization', 'Bearer ' + TOKEN); } catch (e) {} }
-            return super.send(body);
-        }
-        get response() {
-            const r = super.response;
-            if (!this.__ol || this.readyState !== 4 || r == null) return r;
-            if (this.__patched === undefined) {
-                if (typeof r === 'string') this.__patched = rewriteStr(r);
-                else if (r instanceof ArrayBuffer) this.__patched = rewriteBuf(r.slice(0));
-                else this.__patched = r;
-            }
-            return this.__patched;
-        }
-        get responseText() {
-            try {
-                const t = super.responseText;
-                return this.__ol && t ? rewriteStr(t) : t;
-            } catch (e) { return super.responseText; }
-        }
-    };
-    const ofetch = self.fetch.bind(self);
-    self.fetch = async (input, init) => {
-        const url = typeof input === 'string' ? input : (input && input.url);
-        if (!isOL(url)) return ofetch(input, init);
-        init = Object.assign({}, init || {});
-        const headers = new Headers(init.headers || (typeof input !== 'string' && input.headers) || undefined);
-        if (!headers.has('Authorization')) headers.set('Authorization', 'Bearer ' + TOKEN);
-        init.headers = headers;
-        const res = await ofetch(url, init);
-        const buf = await res.arrayBuffer();
-        return new Response(rewriteBuf(buf), { status: res.status, statusText: res.statusText, headers: res.headers });
-    };
-    self.addEventListener('message', (e) => {
-        if (e && e.data && e.data.__olToken) { TOKEN = e.data.__olToken; e.stopImmediatePropagation(); }
-    }, true);
-}
 
 // ---------------------------------------------------------------------------
 // Auth (MSAL popup)
@@ -349,37 +277,40 @@ async function getToken(interactive) {
 }
 
 // ---------------------------------------------------------------------------
-// DuckDB
+// DuckDB — a PERSISTENT database living in OPFS. Parquet data files are pulled
+// from OneLake and imported into native tables (PowerBI-import style); the DB
+// file *is* the local cache. No Iceberg attach, no live remote scans.
 // ---------------------------------------------------------------------------
-let db = null, conn = null, worker = null, currentToken = null, attachPromise = null;
+let db = null, conn = null, worker = null, currentToken = null, persistent = false;
+const OPFS_DB = 'opfs://aemo_cache_v5.db';
 
 async function initDuck(token) {
     currentToken = token;
     const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
-    const patch = `(${workerPatch.toString()})(${JSON.stringify(WORKSPACE)}, ${JSON.stringify(token)});\n`;
-    const workerUrl = URL.createObjectURL(new Blob([patch, `importScripts("${bundle.mainWorker}");`], { type: 'text/javascript' }));
+    const workerUrl = URL.createObjectURL(new Blob([`importScripts("${bundle.mainWorker}");`], { type: 'text/javascript' }));
     worker = new Worker(workerUrl);
     db = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker);
     await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+    try {
+        const RW = (duckdb.DuckDBAccessMode && duckdb.DuckDBAccessMode.READ_WRITE) ?? 3;   // READ_WRITE = 3
+        await db.open({ path: OPFS_DB, accessMode: RW });
+        persistent = true;
+    } catch (e) {
+        console.warn('OPFS persistent DB unavailable — falling back to in-memory (no local cache)', e);
+        persistent = false;
+    }
     conn = await db.connect();
     await q(`SET preserve_insertion_order = false`);
-    console.log('[t] duckdb ready', Math.round(performance.now()));
+    await bootstrapSchema();
+    console.log('[t] duckdb ready', persistent ? '(persistent OPFS)' : '(in-memory)', Math.round(performance.now()));
 }
 
-// Lazy ATTACH: queries serialize on the single connection, so attaching eagerly
-// would queue ahead of the OPFS cache loads and delay the first cached render.
-// Only remote queries (rq) need the catalog; the first one starts the attach.
-function ensureAttach() {
-    if (!attachPromise) {
-        attachPromise = (async () => {
-            await q(`LOAD iceberg`);
-            await q(`CREATE OR REPLACE SECRET onelake (TYPE ICEBERG, TOKEN '${currentToken}', ENDPOINT '${ENDPOINT}')`);
-            await q(`ATTACH '${WORKSPACE}/${LAKEHOUSE}' AS onelake (TYPE ICEBERG, ENDPOINT '${ENDPOINT}', ACCESS_DELEGATION_MODE 'none')`);
-            console.log('[t] onelake attached', Math.round(performance.now()));
-        })();
-        attachPromise.catch(e => console.error('attach failed', e));
-    }
-    return attachPromise;
+// Cache bookkeeping tables (persist alongside the data). cache_state records
+// each table's Iceberg uuid + snapshot; cached_files lists every data file
+// currently imported, so a snapshot change is a plain file-set diff.
+async function bootstrapSchema() {
+    await q(`CREATE TABLE IF NOT EXISTS cache_state (tbl VARCHAR PRIMARY KEY, table_uuid VARCHAR, snapshot_id VARCHAR)`);
+    await q(`CREATE TABLE IF NOT EXISTS cached_files (tbl VARCHAR, path VARCHAR, src VARCHAR, bytes BIGINT)`);
 }
 
 // Columnar extraction — much faster than per-row toJSON for wide results.
@@ -404,28 +335,11 @@ async function q(sqlStr) {
     }
 }
 
-// Remote (catalog-touching) query: waits for the ATTACH, retries once — the
-// first Iceberg scan after ATTACH can fail spuriously in duckdb-wasm.
-async function rq(sqlStr) {
-    await ensureAttach();
-    try { return await q(sqlStr); }
-    catch (e) {
-        if (/null function|No function matches/.test(String(e))) return await q(sqlStr);
-        throw e;
-    }
-}
-
+// Token used only for main-thread authed fetches of metadata + data files.
 async function refreshTokenLoop() {
     try {
         const tok = await getToken(false);
-        if (tok && tok !== currentToken) {
-            currentToken = tok;
-            worker.postMessage({ __olToken: tok });
-            if (attachPromise) {
-                await attachPromise;
-                await q(`CREATE OR REPLACE SECRET onelake (TYPE ICEBERG, TOKEN '${tok}', ENDPOINT '${ENDPOINT}')`);
-            }
-        }
+        if (tok && tok !== currentToken) currentToken = tok;
     } catch (e) { console.warn('token refresh failed', e); }
 }
 
@@ -497,78 +411,47 @@ function grainFor(days) {
     };
 }
 
-const CACHE_VER = 'v4';   // v4: snapshot-diff sync (no signature columns)
-const cacheFile = key => `aemo_${CACHE_VER}_${key}.parquet`;
-const cacheMetaKey = key => `aemo_meta_${CACHE_VER}_${key}`;
+const basename = p => String(p).split('/').pop();
+const sortNewest = fs => [...fs].sort((a, b) => String(b.dateMax || '').localeCompare(String(a.dateMax || '')));
+const fmtBytes = n => n < 1e6 ? `${Math.round(n / 1e3)} KB` : n < 1e9 ? `${(n / 1e6).toFixed(1)} MB` : `${(n / 1e9).toFixed(2)} GB`;
 
-async function opfsWrite(name, buf) {
+// One-time cleanup of the old v4 OPFS parquet caches + localStorage meta index.
+async function cleanupLegacy() {
     try {
         const root = await navigator.storage.getDirectory();
-        const fh = await root.getFileHandle(name, { create: true });
-        const w = await fh.createWritable();
-        await w.write(buf);
-        await w.close();
-        return true;
-    } catch (e) { console.warn('opfs write', name, e); return false; }
-}
-async function opfsRead(name) {
-    try {
-        const root = await navigator.storage.getDirectory();
-        const fh = await root.getFileHandle(name);
-        return new Uint8Array(await (await fh.getFile()).arrayBuffer());
-    } catch { return null; }
-}
-async function tableToOpfs(table, key, meta) {
-    try {
-        const tmp = `export_${key}.parquet`;
-        try { await db.dropFile(tmp); } catch (e) {}
-        await q(`COPY ${table} TO '${tmp}' (FORMAT PARQUET)`);
-        const buf = await db.copyFileToBuffer(tmp);
-        try { await db.dropFile(tmp); } catch (e) {}
-        if (await opfsWrite(cacheFile(key), buf)) {
-            localStorage.setItem(cacheMetaKey(key), JSON.stringify({ ...meta, savedAt: Date.now() }));
+        for await (const [name] of root.entries()) {
+            if (/^aemo_(v\d+|meta)/.test(name) && name.endsWith('.parquet')) { try { await root.removeEntry(name); } catch (e) {} }
         }
-    } catch (e) { console.warn('cache save', key, e); }
-}
-async function tableFromOpfs(table, key) {
-    try {
-        const meta = JSON.parse(localStorage.getItem(cacheMetaKey(key)) || 'null');
-        if (!meta) { console.log(`[cache] ${key}: no meta`); return null; }
-        const buf = await opfsRead(cacheFile(key));
-        if (!buf || !buf.length) { console.log(`[cache] ${key}: no OPFS file`); return null; }
-        console.log(`[cache] ${key}: hit (${(buf.length / 1048576).toFixed(1)} MB)`);
-        const tmp = `import_${key}.parquet`;
-        try { await db.dropFile(tmp); } catch (e) {}
-        await db.registerFileBuffer(tmp, buf);
-        await q(`CREATE OR REPLACE TEMP TABLE ${table} AS SELECT * FROM read_parquet('${tmp}')`);
-        return meta;
-    } catch (e) { console.warn('cache load', key, e); return null; }
+    } catch (e) {}
+    try { for (const k of Object.keys(localStorage)) if (/^aemo_meta_v\d/.test(k)) localStorage.removeItem(k); } catch (e) {}
 }
 
-// loadedWindow is only the RENDER window { grainKey, from, to, rows }. Each
-// grain keeps its own local table tw_<grain> that may hold far more than the
-// render window (prefetched history) — renders filter by date; nothing ever
-// trims the tables down to the view.
+// loadedWindow is only the RENDER window { grainKey, from, to, rows }. Grain
+// tables tw_<grain> are TEMP aggregations rebuilt from the persistent
+// fct_summary table; gcov tracks the date span each currently holds.
 let loadedWindow = null;
-let summaryInfo = null;   // {uuid, snapshot, manifestLists} of fct_summary
-let summaryInfoAt = 0;
-const gstate = {};        // grain.key -> { exists, snapshotId }
-const gs = g => (gstate[g.key] = gstate[g.key] || { exists: false, snapshotId: null });
+const gcov = {};                 // grain.key -> { from, to, rows }
 const tw = g => `tw_${g.key}`;
-const grainByKey = k => k === '5min' ? grainFor(1) : k === 'hour' ? grainFor(7) : grainFor(90);
+function resetGrains() { for (const k in gcov) delete gcov[k]; loadedWindow = null; }
 
-async function getSummaryInfo(maxAgeMs = 60000) {
-    if (!summaryInfo || Date.now() - summaryInfoAt > maxAgeMs) {
-        const info = await fetchTableMeta('fct_summary');
-        if (info) { summaryInfo = info; summaryInfoAt = Date.now(); }
-    }
-    return summaryInfo;
+async function tableHasData(tbl) {
+    try { return Number((await q(`SELECT count(*) AS n FROM cached_files WHERE tbl = '${esc(tbl)}'`))[0].n) > 0; }
+    catch (e) { return false; }
+}
+async function setState(tbl, meta) {
+    await q(`DELETE FROM cache_state WHERE tbl = '${esc(tbl)}'`);
+    await q(`INSERT INTO cache_state VALUES ('${esc(tbl)}', '${esc(meta.uuid)}', '${esc(meta.snapshot)}')`);
+}
+async function wipeTable(tbl) {
+    try { await q(`DROP TABLE IF EXISTS ${tbl}`); } catch (e) {}
+    await q(`DELETE FROM cached_files WHERE tbl = '${esc(tbl)}'`);
+    await q(`DELETE FROM cache_state WHERE tbl = '${esc(tbl)}'`);
 }
 
 // One REST call to the Iceberg catalog: table-uuid changes on a rebuild
 // (drop/CREATE OR REPLACE), current-snapshot-id advances on every commit, and
 // the snapshots array carries each snapshot's manifest-list — everything the
-// snapshot diff needs.
+// file-set diff needs.
 const toHttps = u => String(u).replace(`abfss://${WORKSPACE}@onelake.dfs.fabric.microsoft.com/`, `https://onelake.dfs.fabric.microsoft.com/${WORKSPACE}/`);
 
 async function fetchTableMeta(name) {
@@ -583,8 +466,12 @@ async function fetchTableMeta(name) {
 }
 
 async function fetchAuthed(url) {
-    const r = await fetch(toHttps(url), { headers: { Authorization: `Bearer ${currentToken}` } });
-    if (!r.ok) throw new Error(`fetch ${r.status} for ${url.slice(-60)}`);
+    let r = await fetch(toHttps(url), { headers: { Authorization: `Bearer ${currentToken}` } });
+    if (r.status === 401 || r.status === 403) {       // token expired mid-download — refresh once and retry
+        try { const t = await getToken(false); if (t) currentToken = t; } catch (e) {}
+        r = await fetch(toHttps(url), { headers: { Authorization: `Bearer ${currentToken}` } });
+    }
+    if (!r.ok) throw new Error(`fetch ${r.status} for ${String(url).slice(-60)}`);
     return new Uint8Array(await r.arrayBuffer());
 }
 
@@ -635,15 +522,15 @@ async function readManifest(url) {
     return out;
 }
 
-async function manifestPaths(snapshotId) {
-    const ml = summaryInfo && summaryInfo.manifestLists.get(String(snapshotId));
-    if (!ml) throw new Error('snapshot not in table lineage');
-    return (await readAvroRows(ml, 'manifest_path')).map(r => r.manifest_path);
-}
-
-async function snapshotFiles(snapshotId) {
+// Enumerate the data files of the table's current snapshot: read the snapshot's
+// manifest-list, then each manifest, yielding [{fp, dateMin, dateMax}]. Date
+// bounds (field id 1) are used only to order downloads newest-first.
+async function listSnapshotFiles(meta) {
+    const ml = meta.manifestLists.get(String(meta.snapshot));
+    if (!ml) throw new Error('current snapshot not in table lineage');
+    const manifestPaths = (await readAvroRows(ml, 'manifest_path')).map(r => r.manifest_path);
     const files = [];
-    for (const p of await manifestPaths(snapshotId)) files.push(...await readManifest(p));
+    for (const p of manifestPaths) files.push(...await readManifest(p));
     return files;
 }
 
@@ -654,297 +541,149 @@ function datesBetween(from, to) {
     return out;   // hard cap: nothing legitimate spans >13 years of dates
 }
 
-// Read the given dates from the given file set with plain read_parquet, in
-// batches that keep every file of a date inside one query (so grain buckets
-// never split across batches). Retries each batch once on transient failures.
-const DUMMY_ROW = `(SELECT DATE '1900-01-01' AS date, 0 AS time, '' AS DUID, 0.0 AS mw, 0.0 AS price, TIMESTAMPTZ '1900-01-01 00:00:00+00' AS cutoff) f WHERE 1 = 0`;
-function planBatches(dates, files, maxDates, maxFiles) {
-    const sorted = [...dates].sort();
-    const plan = [];
-    let i = 0;
-    while (i < sorted.length) {
-        const batchDates = [sorted[i]];
-        let fset = new Set(files.filter(f => overlaps(f, sorted[i], sorted[i])).map(f => f.fp));
-        let j = i + 1;
-        while (j < sorted.length && batchDates.length < maxDates) {
-            const next = new Set([...fset, ...files.filter(f => overlaps(f, sorted[j], sorted[j])).map(f => f.fp)]);
-            if (next.size > maxFiles && fset.size) break;
-            fset = next; batchDates.push(sorted[j]); j++;
-        }
-        i = j;
-        if (fset.size) plan.push({ dates: batchDates, files: [...fset] });
-    }
-    return plan;
+// Import (bulk copy) parquet data files into the persistent native table — the
+// PowerBI-import model. Each file is fetched authed on the main thread, handed
+// to DuckDB as a registered buffer, and its rows are INSERTed with a src_file
+// column (the parquet basename) so the file set can later be diffed and rows
+// from dropped files removed. Downloads run a few ahead; inserts serialize on
+// the single connection. Each file's INSERT + bookkeeping is one transaction,
+// so a mid-download crash never leaves cached_files out of step with the data.
+const INGEST_AHEAD = 4;
+
+async function ensureDataTable(tbl, parquetName) {
+    const exists = Number((await q(`SELECT count(*) AS n FROM information_schema.tables WHERE table_name = '${esc(tbl)}'`))[0].n);
+    if (!exists) await q(`CREATE TABLE ${tbl} AS SELECT *, CAST(NULL AS VARCHAR) AS src_file FROM read_parquet('${parquetName}') LIMIT 0`);
 }
 
-async function loadDates(grain, dates, files, createFirst) {
-    const T = tw(grain);
-    const st = gs(grain);
-    const myGen = st.gen || 0;
-    if (createFirst) await q(`CREATE OR REPLACE TEMP TABLE ${T} AS SELECT ${grain.select} FROM ${DUMMY_ROW} ${grain.group}`);
-    // newest first — the dates a user is looking at land before deep history
-    for (const b of planBatches(dates, files, 7, 6).reverse()) {
-        // The table may have been reloaded (prefetch handoff, grain switch)
-        // while this loop was in flight — writing into the new copy would
-        // double-count, so a superseded load aborts.
-        if ((st.gen || 0) !== myGen) { console.log('[cache] load superseded — aborting'); return false; }
-        const dlist = b.dates.map(d => `DATE '${d}'`).join(', ');
-        await q(`DELETE FROM ${T} WHERE date IN (${dlist})`);   // idempotent batches
-        const sql = `INSERT INTO ${T} SELECT ${grain.select} FROM read_parquet([${b.files.map(f => `'${toHttps(f)}'`).join(', ')}]) f
-                     WHERE f.date IN (${dlist}) ${grain.group}`;
-        try { await q(sql); } catch (e) { await q(sql); }
+async function ingestFiles(tbl, entries, onProgress) {
+    if (!entries.length) return 0;
+    let idx = 0, done = 0, bytes = 0, ok = 0;
+    const inflight = new Map();
+    const launch = () => {
+        while (inflight.size < INGEST_AHEAD && idx < entries.length) {
+            const i = idx++, e = entries[i];
+            inflight.set(i, fetchAuthed(e.fp).then(buf => ({ i, e, buf }), err => ({ i, e, err })));
+        }
+    };
+    launch();
+    while (inflight.size) {
+        const res = await Promise.race(inflight.values());
+        inflight.delete(res.i);
+        launch();
+        done++;
+        if (res.err) { console.warn('[ingest] download failed', String(res.e.fp).slice(-40), res.err); if (onProgress) onProgress(done, entries.length, bytes); continue; }
+        const { e, buf } = res, src = basename(e.fp);
+        try {
+            await db.registerFileBuffer('ing.parquet', buf);
+            await ensureDataTable(tbl, 'ing.parquet');
+            await q(`BEGIN`);
+            await q(`INSERT INTO ${tbl} SELECT *, '${esc(src)}' AS src_file FROM read_parquet('ing.parquet')`);
+            await q(`INSERT INTO cached_files VALUES ('${esc(tbl)}', '${esc(e.fp)}', '${esc(src)}', ${buf.length})`);
+            await q(`COMMIT`);
+            ok++; bytes += buf.length;
+        } catch (ex) {
+            try { await q(`ROLLBACK`); } catch (e2) {}
+            console.warn('[ingest] insert failed', src, String(ex && ex.message || ex).slice(0, 140));
+        } finally {
+            try { await db.dropFile('ing.parquet'); } catch (e2) {}
+        }
+        if (onProgress) onProgress(done, entries.length, bytes);
     }
-    return true;
+    return ok;
+}
+
+// Change capture as a FILE-SET DIFF (no date logic). uuid change => the table
+// was dropped/recreated, so wipe and re-import. Otherwise download files new to
+// the current snapshot and delete rows of files it no longer references. A
+// partial cache from an interrupted run heals naturally: cached_files reflects
+// exactly what is imported, so the diff just fills the gap.
+async function syncTable(tbl, opts = {}) {
+    const { onProgress, priorityRange, onPriorityDone } = opts;
+    const meta = await fetchTableMeta(tbl);
+    if (!meta) throw new Error('OneLake catalog unreachable');
+    const state = (await q(`SELECT table_uuid, snapshot_id FROM cache_state WHERE tbl = '${esc(tbl)}'`))[0] || null;
+    let result;
+    if (state && state.table_uuid !== meta.uuid) { await wipeTable(tbl); result = 'rebuilt'; }
+    else if (state && state.snapshot_id === meta.snapshot) return 'unchanged';
+    else result = state ? 'updated' : 'built';
+
+    const files = await listSnapshotFiles(meta);
+    const want = new Map(files.map(f => [f.fp, f]));
+    const have = new Map((await q(`SELECT path, src FROM cached_files WHERE tbl = '${esc(tbl)}'`)).map(r => [r.path, r.src]));
+    const toDel = [...have.keys()].filter(p => !want.has(p));
+    if (toDel.length) {
+        await q(`DELETE FROM ${tbl} WHERE src_file IN (${toDel.map(p => `'${esc(have.get(p))}'`).join(', ')})`);
+        await q(`DELETE FROM cached_files WHERE tbl = '${esc(tbl)}' AND path IN (${toDel.map(p => `'${esc(p)}'`).join(', ')})`);
+    }
+    let toAdd = sortNewest(files.filter(f => !have.has(f.fp)));   // newest first
+    if (toAdd.length && priorityRange && onPriorityDone) {
+        // Import the files overlapping the visible window first, render, then
+        // continue with the rest in the background — the default view lands early.
+        const pri = toAdd.filter(f => overlaps(f, priorityRange.from, priorityRange.to));
+        const rest = toAdd.filter(f => !overlaps(f, priorityRange.from, priorityRange.to));
+        await ingestFiles(tbl, pri, onProgress);
+        if (pri.length) await onPriorityDone();
+        await ingestFiles(tbl, rest, onProgress);
+    } else {
+        await ingestFiles(tbl, toAdd, onProgress);
+    }
+    await setState(tbl, meta);
+    if (persistent) { try { await q(`CHECKPOINT`); } catch (e) {} }
+    return result;
 }
 
 function getRange() { return { from: $('dateFrom').value, to: $('dateTo').value }; }
 
-async function finishWindow(grain, from, to) {
-    const s = (await q(`SELECT count(*) AS n, min(date)::varchar AS mn, max(date)::varchar AS mx FROM ${tw(grain)}`))[0];
-    loadedWindow = { grainKey: grain.key, from, to, rows: num(s.n) };
-    await getSummaryInfo();
-    gs(grain).snapshotId = summaryInfo && summaryInfo.snapshot;
-    // Never clobber a bigger same-snapshot cache (the prefetcher may have just
-    // written full history while this table only holds the interactive window).
-    const stored = JSON.parse(localStorage.getItem(cacheMetaKey(`twin_${grain.key}`)) || 'null');
-    const clobber = stored && summaryInfo && stored.tableUuid === summaryInfo.uuid
-        && stored.snapshotId === gs(grain).snapshotId && stored.rows > num(s.n);
-    if (!clobber) {
-        tableToOpfs(tw(grain), `twin_${grain.key}`, {          // fire-and-forget persist
-            from: s.mn || from, to: s.mx || to, rows: num(s.n), grainKey: grain.key,
-            tableUuid: summaryInfo && summaryInfo.uuid,
-            snapshotId: gs(grain).snapshotId,
-        });
-    }
-    return num(s.n);
-}
-
-// Cold path: no local copy at all. Files overlapping the window come straight
-// from the current snapshot's manifests; data is read with read_parquet only.
-async function buildFull(grain, from, to) {
-    await getSummaryInfo();
-    const files = (await snapshotFiles(summaryInfo.snapshot)).filter(f => overlaps(f, from, to));
-    console.log(`[cache] cold build: ${files.length} file(s) overlap ${from}..${to}`);
-    const st = gs(grain);
-    st.exists = true;
-    st.gen = (st.gen || 0) + 1;
-    await loadDates(grain, datesBetween(from, to), files, true);
-    return finishWindow(grain, from, to);
-}
-
-// Snapshot-primitive sync. Change detection is METADATA ONLY:
-//   1. the two snapshots' manifest-lists (from the catalog REST response) are
-//      diffed to find manifests unique to either side,
-//   2. those manifests (avro, fetched to local buffers — WASM httpfs truncates
-//      larger avro files — and parsed with read_avro) yield the added/removed
-//      data files,
-//   3. parquet_metadata footer stats map changed files to their date ranges.
-// Only then does one targeted DELETE+INSERT touch data, restricted to the
-// affected dates ∩ window — which Iceberg prunes to essentially the changed
-// files. Nothing here scans table data to *detect* change.
-const MAX_DIFF_MANIFESTS = 60;
-
-async function syncWindow(grain, from, to) {
-    const st = gs(grain);
-    try {
-        await getSummaryInfo(15000);
-        if (!st.snapshotId) throw new Error('no snapshot recorded for local table');
-        // Reconcile scope = everything the local table covers, plus the window.
-        const cov = (await q(`SELECT min(date)::varchar AS mn, max(date)::varchar AS mx FROM ${tw(grain)}`))[0];
-        const scopeFrom = cov.mn && cov.mn < from ? cov.mn : from;
-        const scopeTo = cov.mx && cov.mx > to ? cov.mx : to;
-        let affected = [];
-        if (st.snapshotId !== summaryInfo.snapshot) {
-            // Snapshot diff: only manifests unique to either snapshot matter —
-            // shared manifests contribute identical files to both sides.
-            const [cachedMans, currentMans] = await Promise.all([
-                manifestPaths(st.snapshotId), manifestPaths(summaryInfo.snapshot),
-            ]);
-            const cachedSet = new Set(cachedMans), currentSet = new Set(currentMans);
-            const onlyCached = cachedMans.filter(p => !currentSet.has(p));
-            const onlyCurrent = currentMans.filter(p => !cachedSet.has(p));
-            if (onlyCached.length + onlyCurrent.length > MAX_DIFF_MANIFESTS) throw new Error(`${onlyCached.length + onlyCurrent.length} manifests changed — diff too large`);
-            const filesOf = async paths => {
-                const out = new Map();
-                for (const p of paths) for (const f of await readManifest(p)) out.set(f.fp, f);
-                return out;
-            };
-            const cachedFiles = await filesOf(onlyCached);
-            const currentFiles = await filesOf(onlyCurrent);
-            const changed = [
-                ...[...currentFiles.values()].filter(f => !cachedFiles.has(f.fp)),   // added
-                ...[...cachedFiles.values()].filter(f => !currentFiles.has(f.fp)),   // removed
-            ];
-            console.log(`[cache] snapshot diff: ${onlyCurrent.length}+${onlyCached.length} manifest(s), ${changed.length} data file(s) changed`);
-            const days = new Set();
-            for (const f of changed) {
-                if (!f.dateMin || !f.dateMax) { affected = datesBetween(scopeFrom, scopeTo); break; }
-                for (const d of datesBetween(f.dateMin < scopeFrom ? scopeFrom : f.dateMin, f.dateMax > scopeTo ? scopeTo : f.dateMax)) days.add(d);
-            }
-            if (!affected.length) affected = [...days].filter(d => d >= scopeFrom && d <= scopeTo).sort();
-        }
-        if (affected.length) {
-            console.log(`[cache] syncing ${affected.length} affected date(s): ${affected.slice(0, 6).join(', ')}${affected.length > 6 ? '…' : ''}`);
-            await q(`DELETE FROM ${tw(grain)} WHERE date IN (${affected.map(d => `DATE '${d}'`).join(', ')})`);
-        } else {
-            console.log('[cache] no changed files touch the local data');
-        }
-        // Coverage gap-fill: window dates never cached (range widened/shifted)
-        // are absent locally yet unchanged in the snapshot — the diff can't see
-        // them, so they load through the same path.
-        const have = new Set((await q(`SELECT DISTINCT date::varchar AS d FROM ${tw(grain)}`)).map(r => r.d));
-        const toLoad = [...new Set([...affected, ...datesBetween(from, to).filter(d => !have.has(d))])];
-        if (toLoad.length) {
-            const files = (await snapshotFiles(summaryInfo.snapshot)).filter(f => toLoad.some(d => overlaps(f, d, d)));
-            console.log(`[cache] loading ${toLoad.length} date(s) from ${files.length} file(s)`);
-            if (await loadDates(grain, toLoad, files, false) === false) return loadedWindow && loadedWindow.rows;
-        }
-        return finishWindow(grain, from, to);
-    } catch (e) {
-        console.warn(`[cache] snapshot diff unavailable (${String(e && e.message || e).slice(0, 120)}) — full window rebuild`);
-        return buildFull(grain, from, to);
-    }
-}
-
-// Returns true when local data was rendered stale-first (caller should
-// reconcile in the background).
-async function ensureWindow() {
-    const { from, to } = getRange();
+// ---------------------------------------------------------------------------
+// Grain tables: TEMP aggregations built on demand from the persistent
+// fct_summary table. grainFor() picks the bucket (5-min / hour / day) by span;
+// its select/group SQL is reused verbatim. Each grain caches the date span it
+// currently holds so an unchanged range re-renders with no rebuild.
+// ---------------------------------------------------------------------------
+async function ensureGrain(from, to) {
     const grain = grainFor(spanDays(from, to));
-    const st = gs(grain);
-    if (loadedWindow && loadedWindow.grainKey === grain.key && loadedWindow.from === from && loadedWindow.to === to) return false;
-    if (!st.exists) {
-        await getSummaryInfo();
-        const stored = JSON.parse(localStorage.getItem(cacheMetaKey(`twin_${grain.key}`)) || 'null');
-        // A rebuilt table (new uuid) has a fresh snapshot lineage — the cached
-        // snapshot cannot be diffed against it, so this is the one cold-path case.
-        if (stored && summaryInfo && stored.tableUuid !== summaryInfo.uuid) {
-            console.log('[cache] table was rebuilt (uuid changed) — cached data has no lineage, rebuilding');
-        } else if (stored) {
-            const meta = await tableFromOpfs(tw(grain), `twin_${grain.key}`);
-            if (meta) {
-                st.exists = true;
-                st.snapshotId = meta.snapshotId || null;
-                st.gen = (st.gen || 0) + 1;
-                // Self-heal: a past load race may have persisted duplicated
-                // buckets — detect and dedupe before rendering anything.
-                const dup = (await q(`SELECT (count(*) - count(DISTINCT (t, DUID)))::INT AS d FROM ${tw(grain)}`))[0];
-                if (num(dup.d) > 0) {
-                    console.warn(`[cache] healing ${num(dup.d)} duplicated bucket(s) in ${tw(grain)}`);
-                    await q(`CREATE OR REPLACE TEMP TABLE ${tw(grain)} AS
-                             SELECT * FROM ${tw(grain)} QUALIFY row_number() OVER (PARTITION BY t, DUID) = 1`);
-                    st.gen = (st.gen || 0) + 1;
-                }
-            }
-        }
+    const cov = gcov[grain.key];
+    if (cov && cov.from <= from && cov.to >= to) {
+        loadedWindow = { grainKey: grain.key, from, to, rows: cov.rows };
+        return;
     }
-    if (st.exists) {
-        const cov = (await q(`SELECT min(date)::varchar AS mn, max(date)::varchar AS mx, count(*) AS n FROM ${tw(grain)}`))[0];
-        if (cov.mn) {
-            const full = cov.mn <= from && cov.mx >= minusDays(to, 1);
-            const partial = !full && cov.mx >= from && cov.mn <= to;
-            if (full || partial) {
-                loadedWindow = { grainKey: grain.key, from, to, rows: num(cov.n) };
-                await getSummaryInfo();
-                if (full && summaryInfo && st.snapshotId === summaryInfo.snapshot && cov.mx >= to) {
-                    console.log('[cache] snapshot unchanged — local data is current');
-                    return false;
-                }
-                console.log(`[cache] rendering local ${full ? 'coverage' : 'partial coverage'} (${cov.mn}..${cov.mx}), reconciling in background`);
-                return true;
-            }
-            console.log(`[cache] no overlap: local ${cov.mn}..${cov.mx}, want ${from}..${to}`);
-        }
-    }
-    setStatus(`Reading Iceberg from OneLake (${from} → ${to})…`, 'loading');
-    if (st.exists && st.snapshotId) await syncWindow(grain, from, to);
-    else await buildFull(grain, from, to);
-    return false;
+    const sql = `CREATE OR REPLACE TEMP TABLE ${tw(grain)} AS
+                 SELECT ${grain.select} FROM fct_summary f
+                 WHERE f.date BETWEEN DATE '${from}' AND DATE '${to}' ${grain.group}`;
+    try { await q(sql); } catch (e) { await q(sql); }   // retry once — first scan after a (re)build can flake
+    const n = num((await q(`SELECT count(*) AS n FROM ${tw(grain)}`))[0].n);
+    gcov[grain.key] = { from, to, rows: n };
+    loadedWindow = { grainKey: grain.key, from, to, rows: n };
 }
 
-// ---------------------------------------------------------------------------
-// Background prefetcher: a SECOND throwaway DuckDB-WASM instance extends each
-// grain's OPFS cache — hourly to 31 days, 5-minute to 3 days, daily to FULL
-// HISTORY — without ever queueing behind the interactive connection, then
-// terminates. The page picks the caches up through the normal ensure path, so
-// after one visit every preset and custom range is local.
-// ---------------------------------------------------------------------------
-let prefetchStarted = false;
-async function prefetchAll(histFromOverride) {
-    if (prefetchStarted) return;
-    prefetchStarted = true;
-    let pfWorker = null, pfDb = null, pfConn = null;
-    const pfq = async sql => await pfConn.query(sql);
+// Dimension temp table + filter dropdowns, rebuilt from the native dim_duid.
+async function buildTdim() {
+    await q(`CREATE OR REPLACE TEMP TABLE tdim AS
+             SELECT DUID, Region, coalesce(FuelSourceDescriptor, 'Unknown') AS fuel, Participant, State, latitude, longitude
+             FROM dim_duid`);
+}
+async function populateFilters() {
+    allDuids = await q(`SELECT DUID, Region, fuel FROM tdim ORDER BY DUID`);
+    const rf = $('regionFilter'), ff = $('fuelFilter');
+    rf.length = 1; ff.length = 1;   // keep the leading "All …" option
+    for (const r of await q(`SELECT DISTINCT Region FROM tdim ORDER BY 1`)) { const o = document.createElement('option'); o.value = r.Region; o.textContent = r.Region; rf.appendChild(o); }
+    for (const r of await q(`SELECT DISTINCT fuel FROM tdim ORDER BY 1`)) { const o = document.createElement('option'); o.value = r.fuel; o.textContent = r.fuel; ff.appendChild(o); }
+}
+
+// Shared change-capture pass (boot background check + Refresh button). Guarded
+// so the two can't overlap. Returns null when a sync is already running.
+let syncing = false;
+async function syncAll(onProgress) {
+    if (syncing) return null;
+    syncing = true;
     try {
-        await getSummaryInfo();
-        const allFiles = await snapshotFiles(summaryInfo.snapshot);
-        const today = brisbaneToday();
-        const histMin = histFromOverride || allFiles.reduce((m, f) => (f.dateMin && (!m || f.dateMin < m)) ? f.dateMin : m, null) || minusDays(today, 365);
-        const plans = [
-            { key: 'hour', from: minusDays(today, 30), label: '31 days hourly', maxDates: 7, maxFiles: 6 },
-            { key: '5min', from: minusDays(today, 2), label: '3 days 5-minute', maxDates: 3, maxFiles: 6 },
-            { key: 'day', from: histMin, label: `daily history since ${histMin}`, maxDates: 45, maxFiles: 2 },
-        ];
-        const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
-        const patch = `(${workerPatch.toString()})(${JSON.stringify(WORKSPACE)}, ${JSON.stringify(currentToken)});\n`;
-        pfWorker = new Worker(URL.createObjectURL(new Blob([patch, `importScripts("${bundle.mainWorker}");`], { type: 'text/javascript' })));
-        pfDb = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), pfWorker);
-        await pfDb.instantiate(bundle.mainModule, bundle.pthreadWorker);
-        pfConn = await pfDb.connect();
-        await pfq(`SET preserve_insertion_order = false`);
-        for (const p of plans) {
-            const grain = grainByKey(p.key);
-            const key = `twin_${p.key}`;
-            let have = new Set();
-            const stored = JSON.parse(localStorage.getItem(cacheMetaKey(key)) || 'null');
-            const seed = stored && summaryInfo && stored.tableUuid === summaryInfo.uuid ? await opfsRead(cacheFile(key)) : null;
-            if (seed && seed.length) {
-                try { await pfDb.dropFile('seed.parquet'); } catch (e) {}
-                await pfDb.registerFileBuffer('seed.parquet', seed);
-                await pfq(`CREATE OR REPLACE TEMP TABLE t AS SELECT * FROM read_parquet('seed.parquet')`);
-                have = new Set((await pfq(`SELECT DISTINCT date::varchar AS d FROM t`)).toArray().map(r => r.toJSON().d));
-            } else {
-                await pfq(`CREATE OR REPLACE TEMP TABLE t AS SELECT ${grain.select} FROM ${DUMMY_ROW} ${grain.group}`);
-            }
-            // Prefetch only fills dates the cache has never seen; freshness of
-            // recent dates stays the interactive snapshot-diff's job.
-            const dates = datesBetween(p.from, today).filter(d => !have.has(d));
-            if (!dates.length) { console.log(`[prefetch] ${p.label}: already covered`); continue; }
-            console.log(`[prefetch] ${p.label}: ${dates.length} date(s) to load`);
-            const batches = planBatches(dates, allFiles, p.maxDates, p.maxFiles).reverse();   // newest first
-            let done = 0;
-            for (const b of batches) {
-                const sql = `INSERT INTO t SELECT ${grain.select} FROM read_parquet([${b.files.map(f => `'${toHttps(f)}'`).join(', ')}]) f
-                             WHERE f.date IN (${b.dates.map(d => `DATE '${d}'`).join(', ')}) ${grain.group}`;
-                try { await pfq(sql); } catch (e) { try { await pfq(sql); } catch (e2) { console.warn('[prefetch] batch failed:', String(e2).slice(0, 120)); } }
-                done += b.dates.length;
-                if (!running) setStatus(`prefetching ${p.label} — ${Math.min(99, Math.round(done / dates.length * 100))}%`, 'connected');
-            }
-            try { await pfDb.dropFile('out.parquet'); } catch (e) {}
-            await pfq(`COPY t TO 'out.parquet' (FORMAT PARQUET)`);
-            const outBuf = await pfDb.copyFileToBuffer('out.parquet');
-            const st = (await pfq(`SELECT count(*) AS n, min(date)::varchar AS mn, max(date)::varchar AS mx FROM t`)).toArray()[0].toJSON();
-            if (await opfsWrite(cacheFile(key), outBuf)) {
-                localStorage.setItem(cacheMetaKey(key), JSON.stringify({
-                    from: st.mn, to: st.mx, rows: Number(st.n), grainKey: p.key,
-                    tableUuid: summaryInfo.uuid, snapshotId: summaryInfo.snapshot, savedAt: Date.now(),
-                }));
-                // make the interactive side reload this grain from the richer cache
-                const live = gs(grain);
-                live.exists = false; live.snapshotId = null;
-                live.gen = (live.gen || 0) + 1;   // abort any in-flight load into the old copy
-                if (loadedWindow && loadedWindow.grainKey === p.key) loadedWindow = null;
-            }
-            console.log(`[prefetch] ${p.label}: done — ${Number(st.n).toLocaleString()} rows cached (${st.mn}..${st.mx})`);
-        }
-        if (!running) setStatus('prefetch complete — every range is now local', 'connected');
-        if (!running) renderAll();   // reload the active grain from the new cache
-    } catch (e) {
-        console.warn('[prefetch] failed', e);
-    } finally {
-        try { if (pfConn) await pfConn.close(); } catch (e) {}
-        try { if (pfWorker) pfWorker.terminate(); } catch (e) {}
-    }
+        const f = await syncTable('fct_summary', { onProgress });
+        const d = await syncTable('dim_duid', { onProgress });
+        if (d !== 'unchanged') { await buildTdim(); await populateFilters(); }
+        const changed = f !== 'unchanged' || d !== 'unchanged';
+        if (changed) resetGrains();
+        return { f, d, changed };
+    } finally { syncing = false; }
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,9 +797,9 @@ async function renderGeneration(seq, grain) {
         const m = bySeries.get(r.series);
         if (m) m.set(r.t, r.v);
     }
-    // Dates with no local data yet (still prefetching / genuine holes) get an
-    // explicit null marker so the chart shows a BREAK instead of silently
-    // interpolating a straight band across the gap.
+    // Dates with no data (genuine holes in the imported history) get an explicit
+    // null marker so the chart shows a BREAK instead of silently interpolating a
+    // straight band across the gap.
     const gapTs = new Set();
     for (const d of datesBetween(loadedWindow.from, loadedWindow.to)) {
         if (!haveDates.has(d)) gapTs.add(Date.parse(d + 'T12:00:00Z'));
@@ -1268,11 +1007,10 @@ async function renderAll() {
     running = true;
     const seq = ++_renderSeq;
     document.querySelectorAll('.charts, .kpi-row').forEach(el => el.classList.add('loading'));
-    let refreshAfter = false;
     try {
         setStatus('Querying…', 'loading');
-        refreshAfter = await ensureWindow();
-        console.log('[t] window ready', Math.round(performance.now()));
+        const { from, to } = getRange();
+        await ensureGrain(from, to);
         const grain = grainFor(spanDays(loadedWindow.from, loadedWindow.to));
         updateFilterTags();
         await renderGeneration(seq, grain);
@@ -1280,7 +1018,7 @@ async function renderAll() {
         await renderMap(seq, grain);
         console.log('[t] rendered', Math.round(performance.now()));
         const cutoff = (await q(`SELECT max(cutoff)::varchar AS c FROM ${tw(grain)} w WHERE ${windowClause()}`))[0];
-        setStatus(`${fmtInt(loadedWindow.rows)} rows local · data to ${cutoff.c ? String(cutoff.c).slice(0, 16) : loadedWindow.to}${refreshAfter ? ' · refreshing…' : ''}`, refreshAfter ? 'loading' : 'connected');
+        setStatus(`${fmtInt(loadedWindow.rows)} rows local · data to ${cutoff.c ? String(cutoff.c).slice(0, 16) : loadedWindow.to}`, 'connected');
     } catch (e) {
         console.error(e);
         setStatus(String(e && e.message || e).slice(0, 120), 'error');
@@ -1288,20 +1026,7 @@ async function renderAll() {
         document.querySelectorAll('.charts, .kpi-row').forEach(el => el.classList.remove('loading'));
         running = false;
     }
-    if (rerunQueued) { rerunQueued = false; renderAll(); return; }
-    // Background reconcile runs detached so renderAll (and start()) resolve at first paint.
-    if (refreshAfter && seq === _renderSeq) {
-        (async () => {
-            try {
-                const { from, to } = getRange();
-                await syncWindow(grainFor(spanDays(from, to)), from, to);
-                if (seq === _renderSeq) await renderAll();
-            } catch (e) {
-                console.warn('background sync failed', e);
-                setStatus('background sync failed — showing cached data', 'error');
-            }
-        })();
-    }
+    if (rerunQueued) { rerunQueued = false; renderAll(); }
 }
 
 // ---------------------------------------------------------------------------
@@ -1412,7 +1137,6 @@ $('runsql').onclick = async () => {
     $('sqltable').replaceChildren();
     const t0 = performance.now();
     try {
-        if (/onelake\./i.test($('sqlbox').value)) await ensureAttach();
         const rows = await q($('sqlbox').value);
         const cols = rows.length ? Object.keys(rows[0]) : [];
         renderTable($('sqltable'), cols, rows.slice(0, 500));
@@ -1427,7 +1151,6 @@ $('csvsql').onclick = async () => {
     info.className = 'analyze-info';
     info.textContent = 'exporting…';
     try {
-        if (/onelake\./i.test($('sqlbox').value)) await ensureAttach();
         const exportConn = await db.connect();
         try {
             const reader = await exportConn.send($('sqlbox').value);
@@ -1482,32 +1205,47 @@ async function start(token) {
     console.log('[t] start', Math.round(performance.now()));
     await initDuck(token);
     setInterval(refreshTokenLoop, 10 * 60 * 1000);
+    cleanupLegacy();   // fire-and-forget: purge the old v4 parquet caches
 
-    setStatus('Loading dimensions…');
-    const dimInfo = await fetchTableMeta('dim_duid');
-    const dimStored = JSON.parse(localStorage.getItem(cacheMetaKey('dim')) || 'null');
-    const dimUuidOk = dimStored && dimInfo && dimStored.tableUuid && dimStored.tableUuid === dimInfo.uuid;
-    const dimFresh = dimUuidOk && Date.now() - dimStored.savedAt < 24 * 3600 * 1000;
-    const dimMeta = (dimFresh || (dimStored && !dimInfo)) ? await tableFromOpfs('tdim', 'dim') : null;
-    console.log('[t] dims loaded', Math.round(performance.now()));
-    if (!dimMeta) {
-        await rq(`CREATE OR REPLACE TEMP TABLE tdim AS
-                  SELECT DUID, Region, coalesce(FuelSourceDescriptor, 'Unknown') AS fuel, Participant, State, latitude, longitude
-                  FROM onelake.mart.dim_duid`);
-        tableToOpfs('tdim', 'dim', { tableUuid: dimInfo && dimInfo.uuid, snapshotId: dimInfo && dimInfo.snapshot });
-    }
-    allDuids = await q(`SELECT DUID, Region, fuel FROM tdim ORDER BY DUID`);
-    for (const r of await q(`SELECT DISTINCT Region FROM tdim ORDER BY 1`)) {
-        const o = document.createElement('option'); o.value = r.Region; o.textContent = r.Region; $('regionFilter').appendChild(o);
-    }
-    for (const r of await q(`SELECT DISTINCT fuel FROM tdim ORDER BY 1`)) {
-        const o = document.createElement('option'); o.value = r.fuel; o.textContent = r.fuel; $('fuelFilter').appendChild(o);
+    $('sqlbox').value = `SELECT d.State, round(sum(f.mw) / 12) AS mwh\nFROM fct_summary f\nJOIN dim_duid d ON f.DUID = d.DUID\nWHERE f.date >= DATE '${minusDays(end, 1)}'\nGROUP BY 1 ORDER BY 2 DESC;`;
+
+    // Dimensions: if already imported, build tdim from the local copy instantly;
+    // otherwise pull it (tiny). Filters need it before the first render.
+    if (await tableHasData('dim_duid')) {
+        await buildTdim();
+        await populateFilters();
+    } else {
+        setStatus('Importing dimensions…', 'loading');
+        await syncTable('dim_duid', { onProgress: (d, t) => setStatus(`importing dimensions… ${d}/${t}`, 'loading') });
+        await buildTdim();
+        await populateFilters();
     }
 
-    $('sqlbox').value = `SELECT d.State, round(sum(w.mwh)) AS mwh\nFROM tw_hour w\nJOIN tdim d ON w.DUID = d.DUID\nWHERE w.date >= DATE '${minusDays(end, 1)}'\nGROUP BY 1 ORDER BY 2 DESC;`;
-
-    await renderAll();
-    if (!window.__noPrefetch) setTimeout(() => prefetchAll().catch(e => console.warn('[prefetch]', e)), 4000);
+    const { from, to } = getRange();
+    if (await tableHasData('fct_summary')) {
+        // Warm cache: render instantly from the local DB, then check OneLake in
+        // the background and re-render only if a new snapshot changed the files.
+        await renderAll();
+        (async () => {
+            try {
+                const r = await syncAll((d, t, b) => { if (!running) setStatus(`syncing ${d}/${t} · ${fmtBytes(b)}`, 'loading'); });
+                if (r && r.changed) { await renderAll(); }
+                else setStatus(`${fmtInt(loadedWindow.rows)} rows local · up to date`, 'connected');
+            } catch (e) { console.warn('background sync failed', e); }
+        })();
+    } else {
+        // Cold: import the current snapshot's data files. Files overlapping the
+        // default window land first so the dashboard paints before the full
+        // history finishes downloading.
+        setStatus('Importing data from OneLake…', 'loading');
+        await syncTable('fct_summary', {
+            priorityRange: { from, to },
+            onPriorityDone: async () => { await renderAll(); },
+            onProgress: (d, t, b) => setStatus(`importing ${d}/${t} files · ${fmtBytes(b)}`, 'loading'),
+        });
+        resetGrains();
+        await renderAll();
+    }
 }
 
 $('signin').onclick = async () => {
@@ -1521,21 +1259,15 @@ $('signin').onclick = async () => {
 };
 $('signout').onclick = () => { sessionStorage.clear(); location.reload(); };
 $('refreshBtn').onclick = async () => {
-    if (running) return;
+    if (running || syncing) return;
     const btn = $('refreshBtn');
     btn.disabled = true;
     try {
         setStatus('Checking OneLake for a new snapshot…', 'loading');
-        summaryInfoAt = 0;                       // force a fresh catalog read
-        await getSummaryInfo(0);
-        const { from, to } = getRange();
-        const grain = grainFor(spanDays(from, to));
-        if (summaryInfo && gs(grain).snapshotId === summaryInfo.snapshot) {
-            setStatus('up to date — no new snapshot on OneLake', 'connected');
-            return;
-        }
-        setStatus('New snapshot found — syncing…', 'loading');
-        await syncWindow(grain, from, to);
+        const r = await syncAll((d, t, b) => setStatus(`downloading ${d}/${t} · ${fmtBytes(b)}`, 'loading'));
+        if (!r) return;                          // a background sync was already running
+        if (!r.changed) { setStatus('up to date — no new snapshot on OneLake', 'connected'); return; }
+        setStatus('New snapshot imported — refreshing…', 'loading');
         await renderAll();
     } catch (e) {
         setStatus('refresh failed: ' + String(e && e.message || e).slice(0, 80), 'error');
@@ -1546,7 +1278,6 @@ $('refreshBtn').onclick = async () => {
 
 // Hooks for automated end-to-end tests: bypass MSAL with a caller-supplied token.
 window.__dashboardStartWithToken = (token) => start(token);
-window.__prefetchNow = (histFrom) => prefetchAll(histFrom);
 window.__charts = charts;
 window.__dashboardReady = true;
 </script>
