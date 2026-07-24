@@ -303,9 +303,7 @@ def model(dbt, session):
         (
             "duid_data",
             "duid_data",
-            # NOTE: pinned to a patch branch of djouallah/aemo_fabric — deleting that
-            # branch breaks dim_duid. Merge it to main (or vendor the CSV) eventually.
-            "https://raw.githubusercontent.com/djouallah/aemo_fabric/refs/heads/djouallah-patch-1/duid_data.csv",
+            "https://raw.githubusercontent.com/djouallah/aemo_data/refs/heads/main/duid_data.csv",
             "duid_data.csv",
         ),
         (
@@ -317,13 +315,13 @@ def model(dbt, session):
         (
             "duid_wa_energy",
             "WA_ENERGY",
-            "https://raw.githubusercontent.com/djouallah/aemo_fabric/refs/heads/main/WA_ENERGY.csv",
+            "https://raw.githubusercontent.com/djouallah/aemo_data/refs/heads/main/WA_ENERGY.csv",
             "WA_ENERGY.csv",
         ),
         (
             "duid_geo_data",
             "geo_data",
-            "https://raw.githubusercontent.com/djouallah/aemo_fabric/refs/heads/main/geo_data.csv",
+            "https://raw.githubusercontent.com/djouallah/aemo_data/refs/heads/main/geo_data.csv",
             "geo_data.csv",
         ),
     ]
