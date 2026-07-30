@@ -1,15 +1,15 @@
 name: 🎯 Data Pipeline
 
-# Hourly data refresh — check the lakehouse exists, then dbt build from the GitHub runner.
+# On-demand data refresh — check the lakehouse exists, then dbt build from the GitHub runner.
 # No docs, no deploy: pushes go through pipeline.yml (which deploys Fabric items on main).
+#
+# Manual dispatch only. The hourly cron was removed: nothing writes on a schedule now, here
+# or in Fabric (the in-Fabric pipeline scheduler is off and deploy.py no longer re-arms it),
+# so a refresh happens when someone asks for one. Re-adding a `schedule:` here is safe from a
+# correctness angle — every incremental model writes insert-only keyed merges (single append
+# snapshot per commit, the OneLake catalog's limit), so even overlapping runs dedupe on the key
+# and the assert_*_grain tests are the duplicate tripwire — but it spends capacity unattended.
 on:
-  schedule:
-    # CI is the ONLY scheduled writer: the in-Fabric pipeline scheduler is turned off
-    # (and deploy.py no longer re-arms it). All incremental models write insert-only
-    # keyed merges (single append snapshot per commit — the OneLake catalog's limit),
-    # so even overlapping runs dedupe on the key; the assert_*_grain tests are the
-    # duplicate tripwire.
-    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       download_limit:
@@ -49,13 +49,13 @@ env:
   # OIDC federated identity — duckrun mints its own Fabric/OneLake tokens from these.
   AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
   AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-  # Keep in sync with pipeline.yml / deploy.py. Manual dispatch can override;
-  # scheduled runs have no inputs and fall back to the same defaults.
+  # Keep in sync with pipeline.yml / deploy.py. The dispatch form can override; the `||`
+  # fallback still matters — an input cleared to an empty string lands back on this default.
   WS_ID: ${{ inputs.workspace_id || 'ea575278-bd81-459c-9680-47829898c902' }}
   LH_NAME: ${{ inputs.lakehouse_name || 'data' }}
   FOLDER: aemo
-  # Same caps as pipeline.yml — see the comment there. Manual dispatch can override;
-  # scheduled runs have no inputs and fall back to the same 300 defaults.
+  # Same caps as pipeline.yml — see the comment there. The dispatch form can override;
+  # an input left empty falls back to the same 300 default.
   CI_DOWNLOAD_LIMIT: ${{ inputs.download_limit || '300' }}
   CI_PROCESS_LIMIT: ${{ inputs.process_limit || '300' }}
 
