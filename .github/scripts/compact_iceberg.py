@@ -178,7 +178,7 @@ def compact(con, table, say):
     except Exception as e:
         # Keep it to one line — the full multi-line duckdb error is already on stdout above.
         return (table, f"ERROR priming: {type(e).__name__}: {oneline(e)}")
-    say(f"{files} entries in iceberg_metadata")
+    say(f"{files} data files")
 
     say("rewriting")
     try:
@@ -195,16 +195,20 @@ def compact(con, table, say):
     # different failure modes and both look like a tidy table if you collapse them into one
     # "skipped" — which is exactly how the first run hid that nothing was happening.
     if row is None:
-        return (table, f"NO ROW returned ({files} metadata entries)")
+        return (table, f"NO ROW returned ({files} data files)")
 
     rewritten, added, rewritten_bytes = row
     if not rewritten:
-        # Only trustworthy as "already tidy" when the table really is small.
-        note = "already tidy" if files < MIN_INPUT_FILES else "NOTHING REWRITTEN — check this"
-        return (table, f"0 rewritten ({files} metadata entries) — {note}")
+        # Two different innocent reasons, worth telling apart. Under the file threshold means
+        # we declined to look; at or over it means we looked and every file was already at or
+        # above the target size, so folding them would buy nothing. Neither is a problem —
+        # observed on fct_scada, whose files are individually larger than the target.
+        note = (f"under the {MIN_INPUT_FILES}-file threshold" if files < MIN_INPUT_FILES
+                else f"nothing below the {TARGET_FILE_SIZE} target")
+        return (table, f"0 rewritten ({files} data files) — {note}")
 
     mb = (rewritten_bytes or 0) / 1048576.0
-    return (table, f"OK ({rewritten} -> {added} files, {mb:.1f} MB, {files} metadata entries)")
+    return (table, f"OK ({rewritten} -> {added} files, {mb:.1f} MB, {files} data files)")
 
 
 def report(lines, duckdb_version):
