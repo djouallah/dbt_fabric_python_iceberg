@@ -112,6 +112,30 @@ def connect():
     return con
 
 
+def oneline(e):
+    """Collapse a duckdb error to its first line — they carry a SQL echo and a caret ruler."""
+    return " ".join(str(e).split("\n")[0].split())
+
+
+def catalog_tables(con):
+    """What the catalog actually holds, as {"schema.table"}.
+
+    One cheap REST list call, not a metadata scan. Worth it: the first run reported
+    mart.fct_summary_daily as a "Failed to read iceberg table / no version-hint" error, which
+    is what you get when the name doesn't resolve as a catalog table and falls back to being
+    read as a path. Listing up front says plainly whether a table is missing or misnamed
+    instead of dressing it up as a read failure.
+    """
+    try:
+        rows = con.execute(
+            "SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'onelake'"
+        ).fetchall()
+        return {f"{s}.{t}" for s, t in rows}
+    except Exception as e:
+        print(f"  (could not list catalog tables: {oneline(e)})", flush=True)
+        return None
+
+
 def has_rewrite_function(con):
     return (
         con.execute(
@@ -123,17 +147,20 @@ def has_rewrite_function(con):
 
 
 def prime(con, fq):
-    """Make the table's storage credentials available to the rewrite.
+    """Make the table's storage credentials available to the rewrite, and count its files.
 
-    iceberg_rewrite_data_files doesn't fetch them itself — called cold it can die with 403
-    "No credentials are provided" (duckdb/duckdb-iceberg#1349). The reference implementation
-    tried the cheaper options (LIMIT 0, LIMIT 1) against a real catalog and both still 403'd:
-    the 403 is on the manifest avro, and iceberg_metadata() is what reads those.
+    iceberg_rewrite_data_files doesn't fetch credentials itself — called cold it can die with
+    403 "No credentials are provided" (duckdb/duckdb-iceberg#1349). The reference
+    implementation tried the cheaper options (LIMIT 0, LIMIT 1) against a real catalog and
+    both still 403'd: the 403 is on the manifest avro, and iceberg_metadata() is what reads
+    those.
 
     It is expensive — it enumerates every manifest — so it is the one and only metadata call
-    here. Don't add more, and don't "optimise" this one away.
+    here. Don't add more, and don't "optimise" this one away. Since we're paying for it, keep
+    the row count: it is the only independent read on how fragmented the table actually is,
+    and without it a rewrite that does nothing is indistinguishable from a tidy table.
     """
-    con.execute(f"SELECT count(*) FROM iceberg_metadata('{fq}')")
+    return con.execute(f"SELECT count(*) FROM iceberg_metadata('{fq}')").fetchone()[0]
 
 
 def compact(con, table, say):
@@ -142,9 +169,11 @@ def compact(con, table, say):
 
     say("priming credentials")
     try:
-        prime(con, fq)
+        files = prime(con, fq)
     except Exception as e:
-        return (table, f"ERROR priming: {type(e).__name__}: {e}")
+        # Keep it to one line — the full multi-line duckdb error is already on stdout above.
+        return (table, f"ERROR priming: {type(e).__name__}: {oneline(e)}")
+    say(f"{files} entries in iceberg_metadata")
 
     say("rewriting")
     try:
@@ -155,15 +184,22 @@ def compact(con, table, say):
             f"min_input_files => {MIN_INPUT_FILES})"
         ).fetchone()
     except Exception as e:
-        return (table, f"ERROR: {type(e).__name__}: {e}")
+        return (table, f"ERROR: {type(e).__name__}: {oneline(e)}")
 
-    # No row means nothing was eligible — not an error.
-    rewritten, added, rewritten_bytes = row if row else (0, 0, 0)
+    # Report what the function actually returned. "No row at all" and "a row of zeros" are
+    # different failure modes and both look like a tidy table if you collapse them into one
+    # "skipped" — which is exactly how the first run hid that nothing was happening.
+    if row is None:
+        return (table, f"NO ROW returned ({files} metadata entries)")
+
+    rewritten, added, rewritten_bytes = row
     if not rewritten:
-        return (table, f"skipped (<{MIN_INPUT_FILES} eligible files)")
+        # Only trustworthy as "already tidy" when the table really is small.
+        note = "already tidy" if files < MIN_INPUT_FILES else "NOTHING REWRITTEN — check this"
+        return (table, f"0 rewritten ({files} metadata entries) — {note}")
 
     mb = (rewritten_bytes or 0) / 1048576.0
-    return (table, f"OK ({rewritten} -> {added} files, {mb:.1f} MB rewritten)")
+    return (table, f"OK ({rewritten} -> {added} files, {mb:.1f} MB, {files} metadata entries)")
 
 
 def report(lines, duckdb_version):
@@ -199,10 +235,22 @@ def main():
         )
         return
 
+    present = catalog_tables(con)
+    if present is not None:
+        print(f"catalog holds {len(present)} table(s): {', '.join(sorted(present))}")
+        missing = [t for t in TABLES if t not in present]
+        if missing:
+            print(f"::warning::not in the catalog, will be skipped: {', '.join(missing)}")
+        print(flush=True)
+
     started = time.monotonic()
     total = len(TABLES)
     lines = []
     for i, table in enumerate(TABLES, 1):
+        if present is not None and table not in present:
+            lines.append((table, "NOT IN CATALOG — never built, or renamed"))
+            continue
+
         elapsed = (time.monotonic() - started) / 60.0
         if elapsed >= BUDGET_MINUTES:
             # Never drop tables silently — say which ones and why.
