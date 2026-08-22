@@ -22,6 +22,11 @@
 
 {% if is_incremental() %}
 
+-- Deliberately still counts DISTINCT dates, not fully-captured ones. Making this gate fire on
+-- partial dates would pin it permanently true — source-limited dates can never reach a full
+-- day — and the daily branch would then run every time, starving the intraday branch and
+-- letting today's data go stale. So crater healing (see the filter below) rides on the daily
+-- branch whenever it does run, which during backfill is most runs.
 {%- set has_new_daily_query -%}
 SELECT
   (SELECT COUNT(DISTINCT DATE) FROM {{ ref('fct_scada') }} WHERE INTERVENTION = 0) as scada_days,
@@ -58,7 +63,21 @@ WITH daily_summary AS (
     AND s.INITIALMW <> 0
     AND p.INTERVENTION = 0
     {% if is_incremental() %}
-    AND s.DATE NOT IN (SELECT DISTINCT date FROM {{ this }})
+    -- Skip only the dates the summary already holds IN FULL. A partially-loaded date has to
+    -- be revisited: during backfill a date can land with just the intervals fct_scada
+    -- happened to hold at that moment (typically the 49 that came from the previous day's
+    -- archive file), and the old `NOT IN (SELECT date FROM this)` filter meant it was never
+    -- looked at again once the rest of the day arrived — a permanent crater. Observed
+    -- 2025-09-13: 49 intervals in the summary against 288 in fct_scada.
+    -- Reprocessing is safe and cheap under the insert-only merge — the missing
+    -- (date, time, DUID) keys insert, the ones already present DO NOTHING, and it stays a
+    -- single append snapshot, so OneLake's one-add-per-commit rule still holds.
+    -- 280 rather than 288 matches the tolerance in assert_fct_summary_no_partial_dates.
+    -- Source-limited dates (a missing archive file caps them below 280 forever) get re-read
+    -- on each daily run and insert nothing: a few dates' worth of scan, bounded and harmless.
+    AND s.DATE NOT IN (
+      SELECT date FROM {{ this }} GROUP BY date HAVING COUNT(DISTINCT time) >= 280
+    )
     {% endif %}
   GROUP BY ALL
 )
