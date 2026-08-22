@@ -33,6 +33,10 @@ on:
         type: boolean
         default: false
         required: false
+      min_input_files:
+        description: "Compact a table only once it has this many data files (2 forces a rewrite)"
+        default: "5"
+        required: false
 
 concurrency:
   group: data-${{ github.ref_name }}
@@ -157,6 +161,7 @@ jobs:
     timeout-minutes: 90
     env:
       COMPACT_BUDGET_MINUTES: "70"
+      COMPACT_MIN_INPUT_FILES: ${{ inputs.min_input_files || '5' }}
       # Without this python block-buffers stdout when it isn't a TTY, so a job that hits the
       # timeout reports nothing at all about what it was doing.
       PYTHONUNBUFFERED: "1"

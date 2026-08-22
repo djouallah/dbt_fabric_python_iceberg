@@ -49,7 +49,12 @@ WAREHOUSE = os.environ["WAREHOUSE_PATH"]      # "{workspace_id}/{lakehouse_id}"
 TARGET_FILE_SIZE = "64MiB"
 # Don't bother rewriting a table that only has a handful of files. Also what keeps
 # already-tidy tables (dim_calendar, anything compacted last run) cheap.
-MIN_INPUT_FILES = 5
+#
+# Overridable because a dbt run adds exactly one data file per table, so in steady state the
+# tables sit well under this and compaction is a no-op — correct, but it means the rewrite
+# path goes untested for weeks. Dropping this to 2 on a manual run forces a real rewrite and
+# proves the catalog still accepts the commit. Leave the default alone.
+MIN_INPUT_FILES = int(os.environ.get("COMPACT_MIN_INPUT_FILES", "5"))
 # Stop starting new tables past this much wall clock, so the job reports what it did instead
 # of being killed by the runner's timeout mid-rewrite. Keep it well under the workflow's
 # timeout-minutes. Whatever gets skipped is picked up next run — compaction is incremental
