@@ -28,6 +28,11 @@ on:
         description: "Lakehouse name"
         default: "data"
         required: false
+      compact_only:
+        description: "Skip the load and only compact the existing tables"
+        type: boolean
+        default: false
+        required: false
 
 concurrency:
   group: data-${{ github.ref_name }}
@@ -62,6 +67,7 @@ env:
 jobs:
   data:
     name: 🎯 Data
+    if: ${{ !inputs.compact_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -137,7 +143,12 @@ jobs:
   # leaves another small file per table and nothing ever consolidates them.
   compact:
     name: 🧹 Compact
+    # `needs` is for ordering only — never overlap a rewrite with a load. It must NOT gate on
+    # the load succeeding: fragmentation is just as real after a failed dbt build, and a data
+    # test failing (which is what `data` most often fails on) has nothing to do with whether
+    # the tables need compacting. !cancelled() also covers `data` being skipped by compact_only.
     needs: data
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     # Maintenance must never fail the data pipeline.
     continue-on-error: true
@@ -176,8 +187,8 @@ jobs:
           echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
       - name: 🏗️  Resolve lakehouse path
-        # $GITHUB_ENV doesn't cross jobs — re-resolve what the `data` job exported. The
-        # lakehouse already exists by now (`needs: data`), so this is just the id lookup.
+        # $GITHUB_ENV doesn't cross jobs — re-resolve what the `data` job exported. Idempotent,
+        # so it's just an id lookup whether or not the `data` job ran this time.
         run: |
           python - <<'EOF' >> "$GITHUB_ENV"
           import os, duckrun
