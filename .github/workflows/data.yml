@@ -131,3 +131,60 @@ jobs:
           fi
           # Fail the job if all three attempts failed — a red run must not look green.
           exit $rc
+
+  # Fold the small data files back together after the load. Every model here is an
+  # insert-only merge (one add-snapshot per commit, the OneLake catalog's limit), so each run
+  # leaves another small file per table and nothing ever consolidates them.
+  compact:
+    name: 🧹 Compact
+    needs: data
+    runs-on: ubuntu-latest
+    # Maintenance must never fail the data pipeline.
+    continue-on-error: true
+    # Must exceed COMPACT_BUDGET_MINUTES — the script stops starting new tables at the budget
+    # and needs slack to finish the one in flight and print its report.
+    timeout-minutes: 90
+    env:
+      COMPACT_BUDGET_MINUTES: "70"
+      # Without this python block-buffers stdout when it isn't a TTY, so a job that hits the
+      # timeout reports nothing at all about what it was doing.
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 📦 Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: 🔐 Azure federated login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: 🎟️  Mint OneLake token
+        run: |
+          TOKEN=$(az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "ONELAKE_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
+      - name: 🏗️  Resolve lakehouse path
+        # $GITHUB_ENV doesn't cross jobs — re-resolve what the `data` job exported. The
+        # lakehouse already exists by now (`needs: data`), so this is just the id lookup.
+        run: |
+          python - <<'EOF' >> "$GITHUB_ENV"
+          import os, duckrun
+          ws_id, lh_name = os.environ["WS_ID"], os.environ["LH_NAME"]
+          lh_id = duckrun.workspace(ws_id).create_lakehouse(lh_name, folder=os.environ["FOLDER"])
+          print(f"WAREHOUSE_PATH={ws_id}/{lh_id}")
+          EOF
+
+      - name: 🧹 Compact Iceberg data files
+        run: python .github/scripts/compact_iceberg.py

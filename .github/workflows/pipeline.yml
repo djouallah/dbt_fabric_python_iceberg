@@ -58,7 +58,8 @@ jobs:
           cache: pip
 
       - name: 📦 Install dependencies
-        # duckrun brings dbt-duckdb, duckdb>=1.5.4, deltalake, azure-identity and obstore. The
+        # duckrun brings dbt-duckdb, deltalake, azure-identity and obstore; duckdb itself is
+        # pinned to a 1.6.0 dev build in requirements.txt (see the comment there). The
         # Iceberg/azure/avro DuckDB extensions auto-install + auto-load from the stable core repo
         # on first use (no `extensions:` list anywhere) — no nightly force-install needed now the
         # OneLake-Iceberg bug is fixed.

@@ -1,3 +1,7 @@
-# duckrun deliberately pins its own dbt-duckdb / duckdb / deltalake versions —
-# do not add separate pins here, they would fight duckrun's.
+# duckrun pins dbt-duckdb / duckdb / deltalake itself; don't add pins that fight those.
+# duckdb is the one exception: compaction (.github/scripts/compact_iceberg.py) needs
+# iceberg_rewrite_data_files(), which only exists on the 1.6.0 dev line (it self-identifies
+# as v2.0.0-alpha), not in any stable release yet. This satisfies duckrun's duckdb>=1.5.4
+# floor, so pip resolves it without --pre. Bump it by hand; nothing floats it for you.
+duckdb==1.6.0.dev365
 duckrun
