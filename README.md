@@ -8,8 +8,12 @@
 > OneLake Iceberg write is mainly for third-party interoperability — think Snowflake, etc.
 >
 > That said, DuckDB's Iceberg support is maturing fast: **1.4.5** was the first release that
-> basically works, **1.5.3** added `MERGE INTO` (and `ALTER TABLE`), and **2.0** is set to add
-> table maintenance, retries, and more. Run the latest.
+> basically works, **1.5.3** added `MERGE INTO` (and `ALTER TABLE`), and **2.0** adds table
+> maintenance, retries, and more.
+>
+> **This repo requires a DuckDB 2.0 alpha — no stable release will do.** Compaction runs
+> `iceberg_rewrite_data_files()`, which exists only on the 1.6.0 dev line (it self-identifies
+> as `v2.0.0-alpha`). So the pin is exact and deliberate: `duckdb==1.6.0.dev365`.
 
 ---
 
@@ -46,6 +50,7 @@ You can run the notebook anywhere — I've used it on my laptop, GitHub, Colab (
 
 - A Fabric workspace with access to the **OneLake Iceberg write private preview** (the hard gate — everything else is commodity)
 - Python 3.11+
+- **A DuckDB 2.0 alpha** — `duckdb==1.6.0.dev365`, pinned in [`requirements.txt`](requirements.txt) and the notebook's cell 0. Not optional and not a floor: compaction calls `iceberg_rewrite_data_files()`, which no stable DuckDB has. The 1.6.0 dev builds report themselves as `v2.0.0-alpha`. Bump the pin by hand, and keep both places in step so CI and Fabric run the same build.
 - Laptop path: the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) (`az login` with your own identity)
 - CI path: an Azure AD app registration with an OIDC federated credential + two GitHub secrets (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID` — see [CI/CD setup](#cicd-setup-github-actions))
 
@@ -160,6 +165,8 @@ On the Azure side, register an app and add a **federated credential** with subje
 
 Every branch runs the dbt build (run/test/docs) and publishes the docs to GitHub Pages under `/dag/` (branch-based Pages on `gh-pages`). Dashboard-only changes skip all of that: `dashboard.yml` publishes `dashboard/` to the site root in ~30 seconds. Only pushes to `main` deploy the Fabric items (`deploy.py` is hardcoded to one workspace).
 
+**Data refresh runs hourly.** [`data.yml`](.github/workflows/data.yml) is on `cron: '0 * * * *'` and fetches up to 60 files per feed per run — an hour only publishes ~12 intraday files per feed, so that is headroom, not a workload. A workflow-level concurrency group keeps runs from overlapping. Both limits are overridable on manual dispatch, and two extra dispatch inputs exist for maintenance: `compact_only` (skip the load, just compact) and `min_input_files` (how many data files a table needs before it is worth rewriting; drop it to `2` to force a rewrite). The `compact` job runs after every load and is `continue-on-error` — maintenance never fails the pipeline, and it is deliberately not gated on the load succeeding, since fragmentation is just as real after a failed build.
+
 ### Live dashboard (browser-side Iceberg reads)
 
 [`dashboard/index.html`](dashboard/index.html) is a single static page that queries the **Iceberg tables live from OneLake — in the browser, no backend, no data exports**:
@@ -192,7 +199,7 @@ Full DML works as of **v1.5.3**: `CREATE TABLE`, `CTAS`, `INSERT`, `UPDATE`, `DE
 - **Compaction yes, snapshot expiry no.** `iceberg_rewrite_data_files()` folds small data files back together and this repo runs it — see the `compact` job in [`.github/workflows/data.yml`](.github/workflows/data.yml) and [`.github/scripts/compact_iceberg.py`](.github/scripts/compact_iceberg.py). It is only on the DuckDB 1.6.0 dev line (self-identifies as v2.0.0-alpha), which is why `requirements.txt` pins an exact pre-release. Caveats: rewritten files get no manifest-level column statistics, V3 tables and partition spec evolution are unsupported, and there is still **no snapshot expiry** — the pre-compaction files stay in OneLake until something expires them, so reads get faster but storage doesn't shrink. Expiry remains out-of-band (PyIceberg does it).
 - **Partitioned tables** don't honor `write.target-file-size-bytes` or `write.parquet.row-group-size-bytes`.
 - **`Geography` and `Unknown` types** aren't supported yet — planned for DuckDB 2.0.
-- **Track a recent DuckDB.** Iceberg writes to OneLake work out of the box from **1.4.5**; `MERGE INTO`/`ALTER TABLE` arrived in **1.5.3**; `iceberg_rewrite_data_files()` (compaction) is only on the **1.6.0 dev** line. The extension is under heavy development, so this repo deliberately pins an exact pre-release — `duckdb==1.6.0.dev365` in [`requirements.txt`](requirements.txt) and in the notebook's cell 0. Nothing floats it: bump the pin by hand when you want newer, and keep both places in step so CI and Fabric run the same build.
+- **Requires a DuckDB 2.0 alpha.** Iceberg writes to OneLake work out of the box from **1.4.5** and `MERGE INTO`/`ALTER TABLE` arrived in **1.5.3**, so the *pipeline* runs on stable — but `iceberg_rewrite_data_files()` (compaction) exists only on the **1.6.0 dev** line, which identifies itself as `v2.0.0-alpha`. That is why the pin is an exact pre-release, `duckdb==1.6.0.dev365`, in [`requirements.txt`](requirements.txt) and in the notebook's cell 0, rather than a `>=` floor. The extension binary is keyed to the DuckDB build, so pinning DuckDB pins the iceberg extension too. Nothing floats it: bump the pin by hand, and keep both places in step so CI and Fabric run the same build.
 
 ### OneLake / Fabric round-trip
 

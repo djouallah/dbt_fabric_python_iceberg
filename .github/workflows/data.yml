@@ -3,18 +3,21 @@ name: 🎯 Data Pipeline
 # On-demand data refresh — check the lakehouse exists, then dbt build from the GitHub runner.
 # No docs, no deploy: pushes go through pipeline.yml (which deploys Fabric items on main).
 #
-# Manual dispatch only. The hourly cron was removed: nothing writes on a schedule now, here
-# or in Fabric (the in-Fabric pipeline scheduler is off and deploy.py no longer re-arms it),
-# so a refresh happens when someone asks for one. Re-adding a `schedule:` here is safe from a
-# correctness angle — every incremental model writes insert-only keyed merges (single append
-# snapshot per commit, the OneLake catalog's limit), so even overlapping runs dedupe on the key
-# and the assert_*_grain tests are the duplicate tripwire — but it spends capacity unattended.
+# Runs hourly, plus manual dispatch. Safe from a correctness angle: every incremental model
+# writes insert-only keyed merges (single append snapshot per commit, the OneLake catalog's
+# limit), so even overlapping runs dedupe on the key and the assert_*_grain tests are the
+# duplicate tripwire. The concurrency group below keeps runs from overlapping anyway.
+# It does spend capacity unattended — that is the deliberate trade for a always-fresh
+# dashboard. The `compact` job rides along, so the hourly appends get folded back up as they
+# accumulate rather than fragmenting the tables indefinitely.
 on:
+  schedule:
+    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       download_limit:
         description: "Files fetched per feed per run"
-        default: "300"
+        default: "60"
         required: false
       process_limit:
         description: "Files turned into fact rows per feed per run"
@@ -63,9 +66,15 @@ env:
   WS_ID: ${{ inputs.workspace_id || 'ea575278-bd81-459c-9680-47829898c902' }}
   LH_NAME: ${{ inputs.lakehouse_name || 'data' }}
   FOLDER: aemo
-  # Same caps as pipeline.yml — see the comment there. The dispatch form can override;
-  # an input left empty falls back to the same 300 default.
-  CI_DOWNLOAD_LIMIT: ${{ inputs.download_limit || '300' }}
+  # See the comment block in pipeline.yml for what these two mean. The `||` fallback is what
+  # the hourly cron actually uses — `inputs.*` is null on a scheduled run, so these defaults
+  # ARE the schedule's settings, not just a dispatch convenience.
+  # Download is capped at 60/run: an hour only publishes ~12 intraday files per feed, so 60
+  # is headroom rather than a workload, and it keeps a single unattended run bounded.
+  # Process stays at 300 so the backfill of already-downloaded files keeps draining (915
+  # daily files catalogued, well under half turned into fact rows so far) — it also bounds
+  # fct_summary's missing-dates merge source at ~300 days/run, inside runner memory.
+  CI_DOWNLOAD_LIMIT: ${{ inputs.download_limit || '60' }}
   CI_PROCESS_LIMIT: ${{ inputs.process_limit || '300' }}
 
 jobs:
