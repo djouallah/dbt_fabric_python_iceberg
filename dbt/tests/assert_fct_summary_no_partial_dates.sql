@@ -7,14 +7,28 @@
 -- date is excluded (legitimately still filling).
 -- Scoped to a rolling 12-month window: craters only form going forward and get
 -- remediated once flagged, so there is no point re-scanning frozen history every
--- run — the window also lets Iceberg prune the scan. The known by-design SOURCE
--- gaps (a missing daily archive file clips ~4h off one date and ~20h off the
--- next: 2018-08-30/31, 2019-12-31/2020-01-01 — pairs summing to 288) sit far
--- outside this window, so they can never fail it.
+-- run — the window also lets Iceberg prune the scan.
 -- Deliberately NOT tagged heavy: unlike the scada-vs-summary assertions this only
 -- reads fct_summary itself, so CI's small process_limit can't false-positive it.
 -- Remediation: DELETE the flagged dates from fct_summary — the next incremental
--- run's daily branch re-inserts them in full from fct_scada.
+-- run's daily backfill re-inserts them in full from fct_scada.
+--
+-- The `prev day loaded` guard excuses SOURCE gaps, which the remediation above
+-- cannot fix. A date's first ~4h live in the PREVIOUS day's daily archive file
+-- (a date spans 10:00 -> next-day 09:55 +10:00), so when that file was never
+-- available the date is permanently short by ~49 intervals through no fault of
+-- the pipeline — deleting it just rebuilds the same short day and the test fails
+-- forever. Signature is a clean 239, and the pair sums to 288 when the following
+-- date is also clipped. This used to be handled by asserting the known gaps
+-- (2018-08-30/31, 2019-12-31/2020-01-01) sat outside the rolling window; that
+-- broke when 2026-01-01 turned up inside it — its 2025-12-31 file is absent from
+-- the archive entirely, so the day starts at 14:05 with 239 intervals.
+-- Checking whether the previous day loaded states the actual mechanism instead of
+-- hardcoding dates, and it stays a real tripwire: an outage leaves both
+-- neighbours present, so genuine craters are still caught (verified against full
+-- history — the guard excuses only 2018-04-01, 2018-06-27 and 2026-01-01, and
+-- still flags the other eight, including 239-interval dates whose previous day
+-- IS loaded).
 
 WITH per_date AS (
   SELECT
@@ -28,7 +42,13 @@ WITH per_date AS (
 SELECT
   date,
   intervals
-FROM per_date
+FROM per_date p
 WHERE date < (SELECT MAX(date) FROM per_date)
   AND intervals < 280
+  -- Deliberately against the whole table, not per_date: the window's own first
+  -- date has no predecessor inside the window and would be excused every run.
+  AND EXISTS (
+    SELECT 1 FROM {{ ref('fct_summary') }} s
+    WHERE s.date = p.date - INTERVAL 1 DAY
+  )
 ORDER BY date
