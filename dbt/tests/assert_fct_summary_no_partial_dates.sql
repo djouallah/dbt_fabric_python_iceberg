@@ -6,12 +6,18 @@
 -- is the guard that it keeps working.
 --
 -- Compares the summary against fct_scada rather than against a fixed 288, because "short" and
--- "wrong" are not the same thing. Some dates are short at the SOURCE and always will be: a
--- date's first ~4h live in the PREVIOUS day's daily archive file, so when that file was never
--- published the date is permanently capped (2026-01-01 sits at 239, 2025-11-12 at 49, and
--- fct_scada agrees with both). Those are not craters and no amount of reprocessing fixes them.
+-- "wrong" are not the same thing. A date can be short at the SOURCE: its first ~4h live in the
+-- PREVIOUS day's daily archive file, so until the backfill has loaded that file the date sits
+-- capped (at 239 when only the previous file is missing, at 49 when only it is present).
+-- fct_scada agrees with the summary on those, and flagging them is noise — it says the
+-- backfill has not finished, which is not news.
 -- A real crater is the summary holding FEWER intervals than fct_scada actually has — the
 -- pipeline losing data it was handed. Observed 2025-09-13: 49 in the summary, 288 in scada.
+--
+-- Do not re-derive this as "the previous day is missing, so the cap is permanent". It usually
+-- is not: 2026-01-01 and 2025-11-12 both looked permanently capped (239 and 49, with scada
+-- agreeing) and both filled to 288 once the backfill reached the preceding archive file.
+-- Comparing against the source is what makes the distinction self-correcting.
 --
 -- The 280 pre-filter is what keeps this cheap enough to run in CI unTAGGED. It is not the
 -- assertion, just a cheap shortlist off fct_summary alone; only those few dates are then

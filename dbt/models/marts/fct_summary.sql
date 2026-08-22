@@ -73,8 +73,9 @@ WITH daily_summary AS (
     -- (date, time, DUID) keys insert, the ones already present DO NOTHING, and it stays a
     -- single append snapshot, so OneLake's one-add-per-commit rule still holds.
     -- 280 rather than 288 matches the tolerance in assert_fct_summary_no_partial_dates.
-    -- Source-limited dates (a missing archive file caps them below 280 forever) get re-read
-    -- on each daily run and insert nothing: a few dates' worth of scan, bounded and harmless.
+    -- Dates the source itself is still short on (the backfill has not reached the preceding
+    -- archive file yet) get re-read on each daily run and insert nothing until it does — a
+    -- few dates' worth of scan, bounded and harmless, and they fill in on their own.
     AND s.DATE NOT IN (
       SELECT date FROM {{ this }} GROUP BY date HAVING COUNT(DISTINCT time) >= 280
     )
