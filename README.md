@@ -5,15 +5,9 @@
 >
 > _Also requires OneLake Iceberg write (private preview, limited access)._
 >
-> OneLake Iceberg write is mainly for third-party interoperability — think Snowflake, etc.
->
-> That said, DuckDB's Iceberg support is maturing fast: **1.4.5** was the first release that
-> basically works, **1.5.3** added `MERGE INTO` (and `ALTER TABLE`), and **2.0** adds table
-> maintenance, retries, and more.
 >
 > **This repo requires a DuckDB 2.0 alpha — no stable release will do.** Compaction runs
-> `iceberg_rewrite_data_files()`, which exists only on the 1.6.0 dev line (it self-identifies
-> as `v2.0.0-alpha`). So the pin is exact and deliberate: `duckdb==1.6.0.dev365`.
+> `iceberg_rewrite_data_files()`, which exists only since `duckdb==1.6.0.dev365`.
 
 ---
 
