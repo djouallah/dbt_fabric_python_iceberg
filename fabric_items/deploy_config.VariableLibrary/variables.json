@@ -4,6 +4,6 @@
         {"name": "download_limit", "type": "String", "value": "1"},
         {"name": "process_limit", "type": "String", "value": "2"},
         {"name": "lakehouse_name", "type": "String", "value": "data"},
-        {"name": "workspace_id", "type": "String", "value": "ea575278-bd81-459c-9680-47829898c902"}
+        {"name": "workspace_id", "type": "String", "value": "00000000-0000-0000-0000-000000000000"}
     ]
 }

@@ -25,12 +25,13 @@ env:
   # anonymous calls share the runner IP's 60 req/h quota and get rate-limited.
   GITHUB_TOKEN: ${{ github.token }}
   # OIDC federated identity — duckrun mints its own Fabric/OneLake tokens from these (no fab).
-  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-  # Keep in sync with deploy.py's constants (deploy.py is a flat script, so importing it to read
-  # them would run a deploy). FOLDER matters here too: Phase 1 creates the lakehouse on every run
-  # and duckrun only places an item in a folder when it CREATES it.
-  WS_ID: ea575278-bd81-459c-9680-47829898c902
+  # Client/tenant ids are not credentials, so they live in repository VARIABLES, not secrets.
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  # No hardcoded GUIDs: the workspace id is the repo variable WS_ID (deploy.py reads the same
+  # env var, so the two can't drift). FOLDER matters here too: Phase 1 creates the lakehouse on
+  # every run and duckrun only places an item in a folder when it CREATES it.
+  WS_ID: ${{ vars.WS_ID }}
   LH_NAME: data
   FOLDER: aemo
   # Files fetched (download) and turned into fact rows (process) per feed per run. This is a
@@ -68,8 +69,8 @@ jobs:
       - name: 🔐 Azure federated login
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
 
       - name: 🎟️  Mint OneLake token

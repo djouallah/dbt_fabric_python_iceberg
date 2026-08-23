@@ -4,3 +4,4 @@ logs/
 *.db
 .claude/
 .user.yml
+dashboard/config.json

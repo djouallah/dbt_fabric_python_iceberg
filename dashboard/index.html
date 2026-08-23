@@ -243,11 +243,15 @@ import * as duckdb from "https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@latest
 import * as msal from "https://cdn.jsdelivr.net/npm/@azure/msal-browser@3/+esm";
 const echarts = window.echarts;
 
-const WORKSPACE = "ea575278-bd81-459c-9680-47829898c902";
-const LAKEHOUSE = "50d4826c-7ad8-4903-951c-602e2e599990";
+// No hardcoded GUIDs: config.json is generated at deploy time by dashboard.yml from the
+// repo's GitHub variables (WS_ID, LH_ID, AZURE_TENANT_ID, AZURE_CLIENT_ID). For a local
+// preview, drop a config.json with the same four keys next to this file.
+const CFG = await (await fetch("./config.json", { cache: "no-store" })).json();
+const WORKSPACE = CFG.workspace;
+const LAKEHOUSE = CFG.lakehouse;
 const ENDPOINT  = "https://onelake.table.fabric.microsoft.com/iceberg";
-const TENANT    = "4a86d5bb-4173-45ee-bfd5-a3b56ee2d3d5";
-const CLIENT_ID = "ef92c4a2-83b1-4216-b626-286f21c2c5da";
+const TENANT    = CFG.tenant;
+const CLIENT_ID = CFG.clientId;
 const SCOPES    = ["https://storage.azure.com/user_impersonation"];
 
 // ---------------------------------------------------------------------------

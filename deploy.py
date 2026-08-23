@@ -1,9 +1,11 @@
 import os
 import duckrun
 
-WORKSPACE      = "ea575278-bd81-459c-9680-47829898c902"   # analytics workspace
-LAKEHOUSE      = "data"
-FOLDER         = "aemo"          # workspace folder new items land in
+# No hardcoded GUIDs: WS_ID comes from the environment (CI sets it from the repo variable;
+# locally, `set WS_ID=...` / `$env:WS_ID=...` before running). Names keep defaults.
+WORKSPACE      = os.environ["WS_ID"]
+LAKEHOUSE      = os.environ.get("LH_NAME", "data")
+FOLDER         = os.environ.get("FOLDER", "aemo")   # workspace folder new items land in
 SCHEDULE_EVERY = "720m"          # unused while the Fabric scheduler is off — CI (hourly cron)
                                  # is the only scheduled writer; re-enable step 4 below to
                                  # bring the in-Fabric schedule back
@@ -15,7 +17,7 @@ PROCESS_LIMIT  = "100"
 #   here -> Variable Library     5/100  — scheduled Fabric runs top up between CI runs
 #   variables.json               1/2    — committed placeholders, overwritten by this deploy
 #   notebook local-dev branch    2/1000 — laptop runs (VariableLibrary unavailable)
-# WORKSPACE also appears as WS_ID in pipeline.yml — keep those two in sync.
+# WORKSPACE and pipeline.yml's WS_ID both resolve from the same repo variable — one source of truth.
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 ws = duckrun.workspace(WORKSPACE)

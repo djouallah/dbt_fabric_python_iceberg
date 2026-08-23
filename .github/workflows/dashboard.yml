@@ -34,6 +34,20 @@ jobs:
       - name: 📥 Checkout
         uses: actions/checkout@v4
 
+      - name: 🔧 Generate runtime config
+        # index.html fetches this at load time — no tenant/workspace/client GUIDs are
+        # hardcoded in the repo; they live in GitHub repository variables. The client id
+        # is a public SPA id (no secret), so plain variables are the right home.
+        run: |
+          cat > dashboard/config.json <<EOF
+          {
+            "workspace": "${{ vars.WS_ID }}",
+            "lakehouse": "${{ vars.LH_ID }}",
+            "tenant": "${{ vars.AZURE_TENANT_ID }}",
+            "clientId": "${{ vars.AZURE_CLIENT_ID }}"
+          }
+          EOF
+
       - name: ⚙️ Configure Pages
         uses: actions/configure-pages@v5
 

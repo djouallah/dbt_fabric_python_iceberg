@@ -1,7 +1,10 @@
 # Fabric Deploy — duckrun
 
 Deployment uses the **duckrun** workspace API (`deploy.py`), not the Fabric CLI (`fab`). The whole
-flow is a flat, hardcoded script — one workspace, constants at the top, no `deploy_config.yml`.
+flow is a flat script — one workspace, no `deploy_config.yml`. **No GUIDs are hardcoded anywhere**:
+the workspace/lakehouse/tenant/client ids live in GitHub repository **variables** (`WS_ID`, `LH_ID`,
+`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`) and reach the code as env vars (deploy.py reads `WS_ID`;
+the dashboard fetches a `config.json` that dashboard.yml generates from the same variables).
 
 ## deploy.py flow
 
@@ -84,4 +87,5 @@ them back. The `compact` job in `data.yml` (`needs: data`, `continue-on-error`) 
 
 Cell 0 installs `dbt-duckdb` + `duckdb==1.6.0.dev365` then `notebookutils.session.restartPython()` — the
 Fabric runtime preloads an older duckdb binary, so the restart is required before dbt imports it.
-The local-dev branch hardcodes the workspace/lakehouse GUIDs (no `deploy_config.yml`).
+The local-dev branch reads the workspace/lakehouse GUIDs from `WS_ID`/`LH_ID` env vars (no
+`deploy_config.yml`, no hardcoded GUIDs).

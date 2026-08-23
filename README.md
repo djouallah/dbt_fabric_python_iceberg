@@ -46,7 +46,7 @@ You can run the notebook anywhere — I've used it on my laptop, GitHub, Colab (
 - Python 3.11+
 - **A DuckDB 2.0 alpha** — `duckdb==1.6.0.dev365`, pinned in [`requirements.txt`](requirements.txt) and the notebook's cell 0. Not optional and not a floor: compaction calls `iceberg_rewrite_data_files()`, which no stable DuckDB has. The 1.6.0 dev builds report themselves as `v2.0.0-alpha`. Bump the pin by hand, and keep both places in step so CI and Fabric run the same build.
 - Laptop path: the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) (`az login` with your own identity)
-- CI path: an Azure AD app registration with an OIDC federated credential + two GitHub secrets (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID` — see [CI/CD setup](#cicd-setup-github-actions))
+- CI path: an Azure AD app registration with an OIDC federated credential + four GitHub repository **variables** (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `WS_ID`, `LH_ID` — see [CI/CD setup](#cicd-setup-github-actions)). No secrets anywhere — these are all public identifiers.
 
 ## dbt Iceberg configuration
 
@@ -85,6 +85,7 @@ attach:
 ```bash
 az login
 pip install duckrun
+export WS_ID=<your Fabric workspace id>   # nothing is hardcoded — the script reads this
 python deploy.py
 ```
 
@@ -143,7 +144,7 @@ deploy.py (duckrun)
 
 ### Configuration files
 
-- `deploy.py` — hardcoded workspace/lakehouse constants + the duckrun deploy flow
+- `deploy.py` — the duckrun deploy flow; workspace id from the `WS_ID` env var (no hardcoded GUIDs)
 - `profiles.yml` — dbt target with Iceberg attach config
 - `dbt_project.yml` — model config and variable defaults
 
@@ -151,13 +152,15 @@ deploy.py (duckrun)
 
 Auth is **OIDC** — no long-lived bearer tokens stored in GitHub. The workflow exchanges GitHub's short-lived OIDC token for an Azure AD federated credential via `azure/login@v2`, then mints OneLake storage tokens at runtime with `az account get-access-token`. Tokens live only for the duration of a job.
 
-The only GitHub secrets you need:
-- `AZURE_CLIENT_ID` — your Azure AD app registration
+No GitHub **secrets** at all — every id involved is public, so they live in repository **variables** (`gh variable set ...`):
+- `AZURE_CLIENT_ID` — your Azure AD app registration (public client, **no client secret on the app**)
 - `AZURE_TENANT_ID` — your tenant
+- `WS_ID` — the Fabric workspace id
+- `LH_ID` — the lakehouse id (used by the dashboard's generated `config.json`)
 
-On the Azure side, register an app and add a **federated credential** with subject `repo:<owner>/<repo>:ref:refs/heads/main`. Grant it the Fabric workspace permissions you need.
+On the Azure side, register an app and add a **federated credential** with subject `repo:<owner>/<repo>:ref:refs/heads/main` — no client secret needed, OIDC replaces it. Add the app's service principal to the Fabric workspace (Contributor is enough).
 
-Every branch runs the dbt build (run/test/docs) and publishes the docs to GitHub Pages under `/dag/` (branch-based Pages on `gh-pages`). Dashboard-only changes skip all of that: `dashboard.yml` publishes `dashboard/` to the site root in ~30 seconds. Only pushes to `main` deploy the Fabric items (`deploy.py` is hardcoded to one workspace).
+Every branch runs the dbt build (run/test/docs) and publishes the docs to GitHub Pages under `/dag/` (branch-based Pages on `gh-pages`). Dashboard-only changes skip all of that: `dashboard.yml` publishes `dashboard/` to the site root in ~30 seconds (generating `dashboard/config.json` from the repo variables on the way — the page itself contains no GUIDs). Only pushes to `main` deploy the Fabric items (`deploy.py` targets the workspace in `WS_ID`).
 
 **Data refresh runs hourly.** [`data.yml`](.github/workflows/data.yml) is on `cron: '0 * * * *'` and fetches up to 60 files per feed per run — an hour only publishes ~12 intraday files per feed, so that is headroom, not a workload. A workflow-level concurrency group keeps runs from overlapping. Both limits are overridable on manual dispatch, and two extra dispatch inputs exist for maintenance: `compact_only` (skip the load, just compact) and `min_input_files` (how many data files a table needs before it is worth rewriting; drop it to `2` to force a rewrite). The `compact` job runs after every load and is `continue-on-error` — maintenance never fails the pipeline, and it is deliberately not gated on the load succeeding, since fragmentation is just as real after a failed build.
 

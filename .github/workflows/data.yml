@@ -24,8 +24,7 @@ on:
         default: "300"
         required: false
       workspace_id:
-        description: "Fabric workspace ID"
-        default: "ea575278-bd81-459c-9680-47829898c902"
+        description: "Fabric workspace ID (blank = repo variable WS_ID)"
         required: false
       lakehouse_name:
         description: "Lakehouse name"
@@ -59,11 +58,12 @@ env:
   # anonymous calls share the runner IP's 60 req/h quota and get rate-limited.
   GITHUB_TOKEN: ${{ github.token }}
   # OIDC federated identity — duckrun mints its own Fabric/OneLake tokens from these.
-  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-  # Keep in sync with pipeline.yml / deploy.py. The dispatch form can override; the `||`
-  # fallback still matters — an input cleared to an empty string lands back on this default.
-  WS_ID: ${{ inputs.workspace_id || 'ea575278-bd81-459c-9680-47829898c902' }}
+  # Client/tenant ids are not credentials, so they live in repository VARIABLES, not secrets.
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  # The dispatch form can override; the `||` fallback is what the hourly cron uses — and an
+  # input cleared to an empty string lands back on the repo variable too.
+  WS_ID: ${{ inputs.workspace_id || vars.WS_ID }}
   LH_NAME: ${{ inputs.lakehouse_name || 'data' }}
   FOLDER: aemo
   # See the comment block in pipeline.yml for what these two mean. The `||` fallback is what
@@ -99,8 +99,8 @@ jobs:
       - name: 🔐 Azure federated login
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
 
       - name: 🎟️  Mint OneLake token
@@ -190,8 +190,8 @@ jobs:
       - name: 🔐 Azure federated login
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
 
       - name: 🎟️  Mint OneLake token
