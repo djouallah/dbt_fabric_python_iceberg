@@ -46,7 +46,7 @@ You can run the notebook anywhere — I've used it on my laptop, GitHub, Colab (
 - Python 3.11+
 - **A DuckDB 2.0 alpha** — `duckdb==1.6.0.dev365`, pinned in [`requirements.txt`](requirements.txt) and the notebook's cell 0. Not optional and not a floor: compaction calls `iceberg_rewrite_data_files()`, which no stable DuckDB has. The 1.6.0 dev builds report themselves as `v2.0.0-alpha`. Bump the pin by hand, and keep both places in step so CI and Fabric run the same build.
 - Laptop path: the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) (`az login` with your own identity)
-- CI path: an Azure AD app registration with an OIDC federated credential + four GitHub repository **variables** (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `WS_ID`, `LH_ID` — see [CI/CD setup](#cicd-setup-github-actions)). No secrets anywhere — these are all public identifiers.
+- CI path: an Azure AD app registration with an OIDC federated credential + five GitHub repository **variables** (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `WS_ID`, `LH_ID`, `DASHBOARD_CLIENT_ID` — see [CI/CD setup](#cicd-setup-github-actions)). No secrets anywhere — these are all public identifiers.
 
 ## dbt Iceberg configuration
 
@@ -153,10 +153,11 @@ deploy.py (duckrun)
 Auth is **OIDC** — no long-lived bearer tokens stored in GitHub. The workflow exchanges GitHub's short-lived OIDC token for an Azure AD federated credential via `azure/login@v2`, then mints OneLake storage tokens at runtime with `az account get-access-token`. Tokens live only for the duration of a job.
 
 No GitHub **secrets** at all — every id involved is public, so they live in repository **variables** (`gh variable set ...`):
-- `AZURE_CLIENT_ID` — your Azure AD app registration (public client, **no client secret on the app**)
+- `AZURE_CLIENT_ID` — the CI app registration (OIDC federated credential, **no client secret on the app**)
 - `AZURE_TENANT_ID` — your tenant
 - `WS_ID` — the Fabric workspace id
 - `LH_ID` — the lakehouse id (used by the dashboard's generated `config.json`)
+- `DASHBOARD_CLIENT_ID` — the dashboard's SPA app registration (may be the same app as CI if you give one app both a federated credential and a SPA redirect)
 
 On the Azure side, register an app and add a **federated credential** with subject `repo:<owner>/<repo>:ref:refs/heads/main` — no client secret needed, OIDC replaces it. Add the app's service principal to the Fabric workspace (Contributor is enough).
 

@@ -3,8 +3,10 @@
 Deployment uses the **duckrun** workspace API (`deploy.py`), not the Fabric CLI (`fab`). The whole
 flow is a flat script — one workspace, no `deploy_config.yml`. **No GUIDs are hardcoded anywhere**:
 the workspace/lakehouse/tenant/client ids live in GitHub repository **variables** (`WS_ID`, `LH_ID`,
-`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`) and reach the code as env vars (deploy.py reads `WS_ID`;
-the dashboard fetches a `config.json` that dashboard.yml generates from the same variables).
+`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `DASHBOARD_CLIENT_ID`) and reach the code as env vars
+(deploy.py reads `WS_ID`; the dashboard fetches a `config.json` that dashboard.yml generates from
+the same variables). The CI app and the dashboard SPA app are separate registrations in the
+current tenant, hence the two client-id variables.
 
 ## deploy.py flow
 
