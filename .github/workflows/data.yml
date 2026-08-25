@@ -3,16 +3,18 @@ name: 🎯 Data Pipeline
 # On-demand data refresh — check the lakehouse exists, then dbt build from the GitHub runner.
 # No docs, no deploy: pushes go through pipeline.yml (which deploys Fabric items on main).
 #
-# Runs hourly, plus manual dispatch. Safe from a correctness angle: every incremental model
-# writes insert-only keyed merges (single append snapshot per commit, the OneLake catalog's
-# limit), so even overlapping runs dedupe on the key and the assert_*_grain tests are the
-# duplicate tripwire. The concurrency group below keeps runs from overlapping anyway.
-# It does spend capacity unattended — that is the deliberate trade for a always-fresh
-# dashboard. The `compact` job rides along, so the hourly appends get folded back up as they
-# accumulate rather than fragmenting the tables indefinitely.
+# MANUAL ONLY — the hourly cron was removed once djouallah/analytics-as-code took over
+# unattended loading (every 30 min, into its own `nem` lakehouse in the same workspace).
+# Two scheduled writers in one workspace is capacity spent twice. Consequence: this
+# lakehouse and its Direct Lake semantic model only refresh when someone dispatches this
+# workflow (or pipeline.yml). Re-add `schedule: - cron: '0 * * * *'` to bring it back.
+#
+# Correctness is unaffected either way: every incremental model writes insert-only keyed
+# merges (single append snapshot per commit, the OneLake catalog's limit), so even
+# overlapping runs dedupe on the key and the assert_*_grain tests are the duplicate
+# tripwire. The concurrency group below keeps runs from overlapping anyway. The `compact`
+# job rides along, folding appends back up rather than fragmenting the tables.
 on:
-  schedule:
-    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       download_limit:
@@ -61,16 +63,15 @@ env:
   # Client/tenant ids are not credentials, so they live in repository VARIABLES, not secrets.
   AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
   AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-  # The dispatch form can override; the `||` fallback is what the hourly cron uses — and an
-  # input cleared to an empty string lands back on the repo variable too.
+  # The dispatch form can override; the `||` fallback catches an input cleared to an empty
+  # string, which lands back on the repo variable.
   WS_ID: ${{ inputs.workspace_id || vars.WS_ID }}
   LH_NAME: ${{ inputs.lakehouse_name || 'data' }}
   FOLDER: aemo
-  # See the comment block in pipeline.yml for what these two mean. The `||` fallback is what
-  # the hourly cron actually uses — `inputs.*` is null on a scheduled run, so these defaults
-  # ARE the schedule's settings, not just a dispatch convenience.
+  # See the comment block in pipeline.yml for what these two mean. These defaults apply to a
+  # dispatch that leaves the inputs alone.
   # Download is capped at 60/run: an hour only publishes ~12 intraday files per feed, so 60
-  # is headroom rather than a workload, and it keeps a single unattended run bounded.
+  # is headroom rather than a workload, and it keeps a single run bounded.
   # Process stays at 300 so the backfill of already-downloaded files keeps draining (915
   # daily files catalogued, well under half turned into fact rows so far) — it also bounds
   # fct_summary's missing-dates merge source at ~300 days/run, inside runner memory.

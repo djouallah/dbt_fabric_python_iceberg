@@ -34,6 +34,14 @@ script did by hand:
 `FOLDER` only places items duckrun **creates**; existing items are updated in place and stay where
 they already live.
 
+## Scheduling — there isn't any
+
+`data.yml` is manual-dispatch only: its hourly cron was removed once
+`djouallah/analytics-as-code` took over unattended loading (every 30 min, into its own `nem`
+lakehouse in the same `power` workspace). The in-Fabric scheduler is off too (step 4 of
+deploy.py). So this lakehouse and its Direct Lake model refresh only on a manual dispatch —
+that is deliberate, not a bug to "fix" by re-adding a cron without asking.
+
 ## CI (`.github/workflows/pipeline.yml`)
 
 - `pip install -r requirements.txt` → duckrun (brings dbt-duckdb, deltalake, azure-identity,

@@ -6,9 +6,11 @@ import duckrun
 WORKSPACE      = os.environ["WS_ID"]
 LAKEHOUSE      = os.environ.get("LH_NAME", "data")
 FOLDER         = os.environ.get("FOLDER", "aemo")   # workspace folder new items land in
-SCHEDULE_EVERY = "720m"          # unused while the Fabric scheduler is off — CI (hourly cron)
-                                 # is the only scheduled writer; re-enable step 4 below to
-                                 # bring the in-Fabric schedule back
+SCHEDULE_EVERY = "720m"          # unused while the Fabric scheduler is off. NOTE: since
+                                 # data.yml's hourly cron was removed (analytics-as-code now
+                                 # does the unattended loading, into its own lakehouse),
+                                 # nothing refreshes THIS lakehouse on a schedule at all —
+                                 # re-enable step 4 below if you want one again
 DOWNLOAD_LIMIT = "5"             # limits injected into the Variable Library (in-Fabric notebook run)
 PROCESS_LIMIT  = "100"
 
@@ -43,11 +45,12 @@ ws.deploy("fabric_items", lakehouse=LAKEHOUSE, folder=FOLDER, overwrite=True, va
     "workspace_id":   ws.id,
 })
 
-# 4. Fabric pipeline scheduling — intentionally DISABLED (turned off in the workspace;
-#    CI's hourly cron is the only scheduled writer). Deploy must not re-arm it.
-#    Re-enable by uncommenting:
+# 4. Fabric pipeline scheduling — intentionally DISABLED (turned off in the workspace).
+#    Deploy must not re-arm it. Since data.yml's cron was removed too, this lakehouse has
+#    no scheduled writer at all — refresh it by dispatching data.yml/pipeline.yml, or
+#    re-enable the in-Fabric schedule by uncommenting:
 # print("[4/4] Scheduling pipeline...")
 # ws.schedule("run_pipeline", every=SCHEDULE_EVERY)
-print("[4/4] Fabric scheduler intentionally left off (CI cron is the scheduled writer)")
+print("[4/4] Fabric scheduler intentionally left off (refresh via manual dispatch)")
 
 print("=== Deploy complete ===")
