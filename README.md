@@ -1,3 +1,14 @@
+> [!IMPORTANT]
+> **Archived — superseded by [djouallah/dbt-fabric](https://github.com/djouallah/dbt-fabric).**
+>
+> This engine now lives there as one of five targets (`duckrun`, `iceberg`, `ducklake`, `dwh`,
+> `spark`) building the **same gold layer** from one dbt project, with a fingerprint check that
+> proves they agree. This repo drifted from its three siblings until three correctness fixes
+> each existed in exactly one of them; consolidating is what fixed that. Kept read-only for
+> history.
+
+---
+
 # ⚠️ Experimental 🦆
 
 > [!CAUTION]
